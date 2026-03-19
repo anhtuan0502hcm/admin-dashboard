@@ -1,0 +1,172 @@
+"use client";
+
+import { supabase } from "@/lib/supabaseClient";
+
+export type DashboardStats = {
+  users: number;
+  orders: number;
+  revenue: number;
+};
+
+export type DashboardOrderRow = {
+  id: number;
+  user_id: number;
+  username: string | null;
+  display_name: string | null;
+  product_id: number;
+  product_name: string;
+  price: number;
+  quantity: number;
+  created_at: string;
+};
+
+export type DashboardSnapshot = {
+  stats: DashboardStats;
+  pendingDeposits: number;
+  pendingWithdrawals: number;
+  orders: DashboardOrderRow[];
+};
+
+export type RevenueStats = {
+  current: number;
+  previous: number;
+  deltaAmount: number;
+  deltaPercent: number;
+};
+
+export type OrderOpsStats = {
+  orderCount: number;
+  averageOrderValue: number;
+  averageQuantity: number;
+};
+
+export type DirectOrderStats = {
+  total: number;
+  confirmed: number;
+  failed: number;
+  cancelled: number;
+  pending: number;
+  pendingExpired: number;
+  confirmedRate: number;
+  failedRate: number;
+};
+
+export type DailyTrendRow = {
+  dateKey: string;
+  label: string;
+  orders: number;
+  revenue: number;
+};
+
+export type TopProductRow = {
+  productId: string;
+  productName: string;
+  orders: number;
+  quantity: number;
+  revenue: number;
+};
+
+export type ReportsSnapshot = {
+  period: ReportsPeriod;
+  periodLabel: string;
+  comparisonLabel: string;
+  hasComparison: boolean;
+  selectedMonth: string | null;
+  comparisonMonth: string | null;
+  revenue: RevenueStats;
+  orderOps: OrderOpsStats;
+  directOrderStats: DirectOrderStats;
+  dailyTrend: DailyTrendRow[];
+  topProducts: TopProductRow[];
+};
+
+export type ReportsPeriod = "today" | "month" | "quarter" | "custom_month" | "all_time";
+
+export type ReportsSnapshotParams = {
+  period?: ReportsPeriod;
+  month?: string | null;
+  compareMonth?: string | null;
+};
+
+export type UserSnapshotRow = {
+  user_id: number;
+  username: string | null;
+  display_name: string | null;
+  balance: number;
+  balance_usdt: number;
+  language: string | null;
+  created_at: string | null;
+  order_count: number;
+  total_paid: number;
+};
+
+export type UsersSnapshot = {
+  users: UserSnapshotRow[];
+  page: number;
+  pageSize: number;
+  totalCount: number;
+  totalPages: number;
+};
+
+async function fetchAdminSnapshot<T>(path: string): Promise<T> {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  if (!token) {
+    throw new Error("Chưa đăng nhập.");
+  }
+
+  const response = await fetch(path, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`
+    },
+    cache: "no-store"
+  });
+
+  const json = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(
+      typeof json?.error === "string" && json.error.trim()
+        ? json.error
+        : "Không thể tải dữ liệu."
+    );
+  }
+
+  return (json?.data ?? null) as T;
+}
+
+export const fetchDashboardSnapshot = () =>
+  fetchAdminSnapshot<DashboardSnapshot>("/api/admin-analytics/dashboard");
+
+export const fetchReportsSnapshot = ({
+  period = "month",
+  month,
+  compareMonth
+}: ReportsSnapshotParams = {}) => {
+  const params = new URLSearchParams();
+  params.set("period", period);
+  if (month) {
+    params.set("month", month);
+  }
+  if (compareMonth) {
+    params.set("compareMonth", compareMonth);
+  }
+
+  return fetchAdminSnapshot<ReportsSnapshot>(`/api/admin-analytics/reports?${params.toString()}`);
+};
+
+export const fetchUsersSnapshot = ({
+  page = 1,
+  pageSize = 50,
+  search = ""
+}: {
+  page?: number;
+  pageSize?: number;
+  search?: string;
+}) =>
+  fetchAdminSnapshot<UsersSnapshot>(
+    `/api/admin-analytics/users?page=${Math.max(1, Math.trunc(page) || 1)}&pageSize=${Math.max(
+      1,
+      Math.min(Math.trunc(pageSize) || 50, 200)
+    )}&q=${encodeURIComponent(search)}`
+  );

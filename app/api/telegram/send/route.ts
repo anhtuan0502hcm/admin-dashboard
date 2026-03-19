@@ -1,25 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 const botToken = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || "";
 const MAX_MESSAGE_LENGTH = 4096;
+const MAX_TELEGRAM_RETRIES = 2;
+const BROADCAST_RATE_WINDOW_MS = 1000;
 
-const buildSupabaseClient = (token?: string) =>
-  createClient(supabaseUrl, supabaseAnonKey, {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false
-    },
-    global: token
-      ? {
-          headers: {
-            Authorization: `Bearer ${token}`
-          }
-        }
-      : undefined
-  });
+const toPositiveInt = (rawValue: string | undefined, fallback: number) => {
+  const parsed = Number.parseInt(String(rawValue || "").trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const BROADCAST_MAX_SENDS_PER_WINDOW = toPositiveInt(
+  process.env.TELEGRAM_BROADCAST_MAX_PER_SECOND,
+  30
+);
+const BROADCAST_WORKER_COUNT = toPositiveInt(process.env.TELEGRAM_BROADCAST_WORKERS, 40);
+const BROADCAST_SLOT_SAFETY_MS = 15;
 
 const fetchAllUserIds = async (client: any) => {
   const ids: number[] = [];
@@ -52,7 +49,29 @@ const fetchAllUserIds = async (client: any) => {
   return ids;
 };
 
-const sendTelegramMessage = async (chatId: number, text: string) => {
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const getRetryAfterMs = (payload: unknown) => {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const retryAfter = (payload as { parameters?: { retry_after?: unknown } }).parameters?.retry_after;
+  const seconds = Number(retryAfter);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null;
+};
+
+const sendTelegramMessage = async (
+  chatId: number,
+  text: string,
+  attempt = 0,
+  options?: {
+    onRateLimit?: (retryAfterMs: number) => void;
+  }
+): Promise<
+  | { ok: true; message_id: number | null; date: number | null; text: string }
+  | { ok: false }
+> => {
   const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -63,6 +82,13 @@ const sendTelegramMessage = async (chatId: number, text: string) => {
   });
 
   const payload = await response.json().catch(() => null);
+  if (response.status === 429 && attempt < MAX_TELEGRAM_RETRIES) {
+    const retryAfterMs = getRetryAfterMs(payload) ?? 1000;
+    options?.onRateLimit?.(retryAfterMs);
+    await sleep(retryAfterMs);
+    return sendTelegramMessage(chatId, text, attempt + 1, options);
+  }
+
   if (!response.ok || !payload || payload.ok !== true || !payload.result) {
     return { ok: false as const };
   }
@@ -75,18 +101,84 @@ const sendTelegramMessage = async (chatId: number, text: string) => {
   };
 };
 
+const sendBroadcastMessages = async (targets: number[], text: string) => {
+  let success = 0;
+  let failed = 0;
+  let nextIndex = 0;
+  let cooldownUntil = 0;
+  const recentSendStarts: number[] = [];
+
+  const setGlobalCooldown = (retryAfterMs: number) => {
+    const safeDelay = Math.max(retryAfterMs, BROADCAST_RATE_WINDOW_MS);
+    cooldownUntil = Math.max(cooldownUntil, Date.now() + safeDelay);
+  };
+
+  const acquireBroadcastSlot = async () => {
+    while (true) {
+      const now = Date.now();
+
+      if (cooldownUntil > now) {
+        await sleep(cooldownUntil - now);
+        continue;
+      }
+
+      while (recentSendStarts.length && now - recentSendStarts[0] >= BROADCAST_RATE_WINDOW_MS) {
+        recentSendStarts.shift();
+      }
+
+      if (recentSendStarts.length < BROADCAST_MAX_SENDS_PER_WINDOW) {
+        recentSendStarts.push(now);
+        return;
+      }
+
+      const waitMs = Math.max(
+        BROADCAST_SLOT_SAFETY_MS,
+        BROADCAST_RATE_WINDOW_MS - (now - recentSendStarts[0]) + BROADCAST_SLOT_SAFETY_MS
+      );
+      await sleep(waitMs);
+    }
+  };
+
+  const worker = async () => {
+    while (true) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+
+      if (currentIndex >= targets.length) {
+        return;
+      }
+
+      const chatId = targets[currentIndex];
+      await acquireBroadcastSlot();
+      const result = await sendTelegramMessage(chatId, text, 0, {
+        onRateLimit: setGlobalCooldown
+      });
+
+      if (result.ok) {
+        success += 1;
+      } else {
+        failed += 1;
+      }
+    }
+  };
+
+  const workerCount = Math.min(
+    Math.max(1, BROADCAST_WORKER_COUNT),
+    Math.max(1, targets.length)
+  );
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+  return { success, failed };
+};
+
 export async function POST(request: NextRequest) {
-  if (!supabaseUrl || !supabaseAnonKey) {
-    return NextResponse.json({ error: "Supabase env missing." }, { status: 500 });
-  }
   if (!botToken) {
     return NextResponse.json({ error: "BOT_TOKEN missing." }, { status: 500 });
   }
 
-  const authHeader = request.headers.get("authorization") || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-  if (!token) {
-    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+  const adminSession = await requireAdminSession(request);
+  if (adminSession.ok === false) {
+    return adminSession.response;
   }
 
   let body: { message?: string; userId?: number | string; broadcast?: boolean };
@@ -102,23 +194,7 @@ export async function POST(request: NextRequest) {
   }
 
   const trimmedMessage = message.slice(0, MAX_MESSAGE_LENGTH);
-
-  const authClient = buildSupabaseClient();
-  const { data: userData, error: userError } = await authClient.auth.getUser(token);
-  if (userError || !userData.user) {
-    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
-  }
-
-  const supabase = buildSupabaseClient(token);
-  const { data: adminRow, error: adminError } = await supabase
-    .from("admin_users")
-    .select("role")
-    .eq("user_id", userData.user.id)
-    .maybeSingle();
-
-  if (adminError || !adminRow) {
-    return NextResponse.json({ error: "Forbidden." }, { status: 403 });
-  }
+  const supabase = adminSession.supabase;
 
   const broadcast = body.broadcast === true;
   const userId = body.userId ? Number(body.userId) : null;
@@ -137,8 +213,17 @@ export async function POST(request: NextRequest) {
     targets = [userId];
   }
 
+  targets = Array.from(
+    new Set(targets.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0))
+  );
+
   if (!targets.length) {
     return NextResponse.json({ success: 0, failed: 0, total: 0 });
+  }
+
+  if (broadcast) {
+    const result = await sendBroadcastMessages(targets, trimmedMessage);
+    return NextResponse.json({ ...result, total: targets.length });
   }
 
   let success = 0;

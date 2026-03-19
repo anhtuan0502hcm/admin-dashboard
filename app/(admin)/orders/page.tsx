@@ -13,18 +13,26 @@ interface OrderRow {
 }
 
 export default function OrdersPage() {
+  const PAGE_SIZE = 50;
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [usernamesByUserId, setUsernamesByUserId] = useState<Record<string, string | null>>({});
   const [productNamesById, setProductNamesById] = useState<Record<string, string>>({});
+  const [page, setPage] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
-  const load = async () => {
-    const { data } = await supabase
+  const load = async (pageIndex: number) => {
+    const from = (pageIndex - 1) * PAGE_SIZE;
+    const to = from + PAGE_SIZE - 1;
+
+    const { data, count } = await supabase
       .from("orders")
-      .select("id, user_id, product_id, price, quantity, created_at")
+      .select("id, user_id, product_id, price, quantity, created_at", { count: "exact" })
       .order("created_at", { ascending: false })
-      .limit(200);
+      .range(from, to);
     const rows = (data as OrderRow[]) || [];
     setOrders(rows);
+    setTotalCount(count ?? 0);
 
     const userIds = Array.from(
       new Set(
@@ -68,8 +76,8 @@ export default function OrdersPage() {
   };
 
   useEffect(() => {
-    load();
-  }, []);
+    load(page).catch(() => null);
+  }, [page]);
 
   const formatDateTime = (isoString: string | null | undefined) => {
     if (!isoString) return "-";
@@ -129,6 +137,27 @@ export default function OrdersPage() {
             )}
           </tbody>
         </table>
+        {totalPages > 1 && (
+          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12 }}>
+            <button
+              className="button secondary"
+              disabled={page === 1}
+              onClick={() => setPage(Math.max(1, page - 1))}
+            >
+              Trang trước
+            </button>
+            <span className="muted">
+              Trang {page}/{totalPages} · Tổng {totalCount.toLocaleString("vi-VN")}
+            </span>
+            <button
+              className="button secondary"
+              disabled={page === totalPages}
+              onClick={() => setPage(Math.min(totalPages, page + 1))}
+            >
+              Trang sau
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

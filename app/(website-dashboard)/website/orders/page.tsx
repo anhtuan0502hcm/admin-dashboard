@@ -14,6 +14,7 @@ interface WebsiteOrderRow {
   created_at: string;
   products?: {
     name: string;
+    website_name?: string | null;
   }[] | null;
 }
 
@@ -24,7 +25,7 @@ export default function WebsiteOrdersPage() {
   const load = async () => {
     const { data, error } = await supabase
       .from("website_orders")
-      .select("id, auth_user_id, user_email, product_id, content, price, quantity, created_at, products(name)")
+      .select("id, auth_user_id, user_email, product_id, content, price, quantity, created_at, products(name, website_name)")
       .order("created_at", { ascending: false })
       .limit(200);
 
@@ -77,7 +78,7 @@ export default function WebsiteOrdersPage() {
               <tr key={order.id}>
                 <td>#{order.id}</td>
                 <td>{order.user_email || order.auth_user_id || "-"}</td>
-                <td>{order.products?.[0]?.name ?? `#${order.product_id}`}</td>
+                <td>{order.products?.[0]?.website_name || order.products?.[0]?.name || `#${order.product_id}`}</td>
                 <td>{order.quantity}</td>
                 <td>{Number(order.price || 0).toLocaleString("vi-VN")}</td>
                 <td>{order.created_at ? new Date(order.created_at).toLocaleString("vi-VN") : "-"}</td>

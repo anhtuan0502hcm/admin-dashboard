@@ -6,6 +6,7 @@ import { supabase } from "@/lib/supabaseClient";
 interface Product {
   id: number;
   name: string;
+  website_name: string | null;
 }
 
 interface StockItem {
@@ -51,8 +52,23 @@ export default function StockPage() {
   const selectAllRef = useRef<HTMLInputElement | null>(null);
 
   const loadProducts = async () => {
-    const { data } = await supabase.from("products").select("id, name").order("id");
-    setProducts((data as Product[]) || []);
+    const { data, error } = await supabase
+      .from("products")
+      .select("id, name, website_name")
+      .eq("website_deleted", false)
+      .order("website_sort_position", { ascending: true, nullsFirst: false })
+      .order("id");
+    if (error) {
+      const { data: fallbackData } = await supabase.from("products").select("id, name").order("id");
+      setProducts(((fallbackData as Product[]) || []).map((row) => ({ ...row, website_name: null })));
+      return;
+    }
+    setProducts(
+      ((data as Product[]) || []).map((row) => ({
+        ...row,
+        name: row.website_name?.trim() || row.name
+      }))
+    );
   };
 
   const loadStock = async (productId: string, pageIndex = page) => {

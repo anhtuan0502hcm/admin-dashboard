@@ -1,103 +1,201 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  fetchReportsSnapshot,
+  type RevenueStats,
+  type OrderOpsStats,
+  type DirectOrderStats,
+  type DailyTrendRow,
+  type TopProductRow,
+  type ReportsPeriod,
+  type ReportsSnapshotParams,
+  type ReportsSnapshot
+} from "@/lib/adminAnalyticsClient";
 
-interface RevenueStats {
-  today: number;
-  yesterday: number;
-  last7: number;
-  previous7: number;
-  last30: number;
-}
-
-interface OrderOpsStats {
-  ordersToday: number;
-  ordersLast7: number;
-  ordersLast30: number;
-  averageOrderValue30: number;
-  averageQuantity30: number;
-}
-
-interface DirectOrderStats {
-  total: number;
-  confirmed: number;
-  failed: number;
-  cancelled: number;
-  pending: number;
-  pendingExpired: number;
-  confirmedRate: number;
-  failedRate: number;
-}
-
-interface DailyTrendRow {
-  dateKey: string;
-  label: string;
-  orders: number;
-  revenue: number;
-}
-
-interface TopProductRow {
-  productId: string;
-  productName: string;
-  orders: number;
-  quantity: number;
-  revenue: number;
-}
-
-interface OrderMetricRow {
-  product_id: number | string | null;
-  price: number | null;
-  quantity: number | null;
-  created_at: string | null;
-}
-
-const TZ = "Asia/Ho_Chi_Minh";
-
-const toDateKey = (value: Date | string) =>
-  new Intl.DateTimeFormat("en-CA", {
-    timeZone: TZ,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).format(typeof value === "string" ? new Date(value) : value);
-
-const toShortDateLabel = (value: Date) =>
-  new Intl.DateTimeFormat("vi-VN", {
-    timeZone: TZ,
-    day: "2-digit",
-    month: "2-digit"
-  }).format(value);
+const MONTH_CELL_LABELS = ["T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11", "T12"];
 
 const calcDeltaPercent = (current: number, previous: number) => {
   if (previous <= 0) return current > 0 ? 100 : 0;
   return ((current - previous) / previous) * 100;
 };
 
-const formatDelta = (value: number) => {
+const formatDeltaPercent = (value: number) => {
   if (!Number.isFinite(value)) return "0%";
   const rounded = Math.round(value * 10) / 10;
   if (rounded > 0) return `+${rounded}%`;
   return `${rounded}%`;
 };
 
+const formatCurrency = (value: number) => Math.round(value || 0).toLocaleString("vi-VN");
+
+const formatMoneyDelta = (value: number) => {
+  const rounded = Math.round(value || 0);
+  if (rounded > 0) return `+${formatCurrency(rounded)}`;
+  if (rounded < 0) return `-${formatCurrency(Math.abs(rounded))}`;
+  return "0";
+};
+
+const getMonthInputValue = (value: Date) => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    year: "numeric",
+    month: "2-digit"
+  }).formatToParts(value);
+
+  const year = parts.find((part) => part.type === "year")?.value || "1970";
+  const month = parts.find((part) => part.type === "month")?.value || "01";
+  return `${year}-${month}`;
+};
+
+const parseMonthValue = (value: string) => {
+  const match = /^(\d{4})-(\d{2})$/.exec(value || "");
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+    return null;
+  }
+
+  return { year, month };
+};
+
+const shiftMonthInputValue = (value: string, delta: number) => {
+  const parsed = parseMonthValue(value);
+  if (!parsed) {
+    return getMonthInputValue(new Date());
+  }
+
+  const shifted = new Date(Date.UTC(parsed.year, parsed.month - 1 + delta, 1));
+  return getMonthInputValue(shifted);
+};
+
+const formatMonthDisplay = (value: string) => {
+  const parsed = parseMonthValue(value);
+  if (!parsed) return "Chọn tháng";
+  return `tháng ${parsed.month} năm ${parsed.year}`;
+};
+
+type MonthOnlyPickerProps = {
+  label: string;
+  value: string;
+  onChange: (nextValue: string) => void;
+};
+
+function MonthOnlyPicker({ label, value, onChange }: MonthOnlyPickerProps) {
+  const [open, setOpen] = useState(false);
+  const [visibleYear, setVisibleYear] = useState(parseMonthValue(value)?.year ?? new Date().getFullYear());
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const parsed = parseMonthValue(value);
+    if (parsed) {
+      setVisibleYear(parsed.year);
+    }
+  }, [value]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [open]);
+
+  const selected = parseMonthValue(value);
+
+  return (
+    <div className="month-picker" ref={rootRef}>
+      <p className="muted" style={{ marginBottom: 6 }}>{label}</p>
+      <button
+        type="button"
+        className={`month-picker-trigger ${open ? "is-open" : ""}`}
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span>{formatMonthDisplay(value)}</span>
+        <span className="month-picker-caret" aria-hidden="true">▾</span>
+      </button>
+
+      {open && (
+        <div className="month-picker-popover">
+          <div className="month-picker-panel">
+            <div className="month-picker-header">
+              <button
+                type="button"
+                className="month-picker-nav"
+                aria-label="Năm trước"
+                onClick={() => setVisibleYear((year) => year - 1)}
+              >
+                ‹
+              </button>
+              <div className="month-picker-title">năm {visibleYear}</div>
+              <button
+                type="button"
+                className="month-picker-nav"
+                aria-label="Năm sau"
+                onClick={() => setVisibleYear((year) => year + 1)}
+              >
+                ›
+              </button>
+            </div>
+
+            <div className="month-picker-grid">
+              {MONTH_CELL_LABELS.map((monthLabel, index) => {
+                const month = index + 1;
+                const optionValue = `${visibleYear}-${String(month).padStart(2, "0")}`;
+                const active = selected?.year === visibleYear && selected.month === month;
+
+                return (
+                  <button
+                    key={optionValue}
+                    type="button"
+                    className={`month-picker-cell ${active ? "active" : ""}`}
+                    onClick={() => {
+                      onChange(optionValue);
+                      setOpen(false);
+                    }}
+                  >
+                    {monthLabel}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ReportsPage() {
+  const initialMonth = getMonthInputValue(new Date());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selectedPeriod, setSelectedPeriod] = useState<ReportsPeriod>("month");
+  const [resolvedPeriod, setResolvedPeriod] = useState<ReportsPeriod>("month");
+  const [selectedMonth, setSelectedMonth] = useState(initialMonth);
+  const [compareMonth, setCompareMonth] = useState(shiftMonthInputValue(initialMonth, -1));
+  const [periodLabel, setPeriodLabel] = useState("Tháng này");
+  const [comparisonLabel, setComparisonLabel] = useState("Tháng trước");
+  const [hasComparison, setHasComparison] = useState(true);
 
   const [revenue, setRevenue] = useState<RevenueStats>({
-    today: 0,
-    yesterday: 0,
-    last7: 0,
-    previous7: 0,
-    last30: 0
+    current: 0,
+    previous: 0,
+    deltaAmount: 0,
+    deltaPercent: 0
   });
   const [orderOps, setOrderOps] = useState<OrderOpsStats>({
-    ordersToday: 0,
-    ordersLast7: 0,
-    ordersLast30: 0,
-    averageOrderValue30: 0,
-    averageQuantity30: 0
+    orderCount: 0,
+    averageOrderValue: 0,
+    averageQuantity: 0
   });
   const [directOrderStats, setDirectOrderStats] = useState<DirectOrderStats>({
     total: 0,
@@ -116,219 +214,68 @@ export default function ReportsPage() {
     const load = async () => {
       setLoading(true);
       setError(null);
-
-      const now = new Date();
-      const startToday = new Date(now);
-      startToday.setHours(0, 0, 0, 0);
-      const startYesterday = new Date(startToday);
-      startYesterday.setDate(startYesterday.getDate() - 1);
-
-      const start7 = new Date(now);
-      start7.setDate(start7.getDate() - 7);
-      const startPrev7 = new Date(start7);
-      startPrev7.setDate(startPrev7.getDate() - 7);
-      const start30 = new Date(now);
-      start30.setDate(start30.getDate() - 30);
-      const start60 = new Date(now);
-      start60.setDate(start60.getDate() - 60);
-
-      const pendingExpiredBefore = new Date(now.getTime() - 10 * 60 * 1000).toISOString();
-
-      const trendSeed = new Map<string, DailyTrendRow>();
-      for (let i = 6; i >= 0; i -= 1) {
-        const d = new Date(startToday);
-        d.setDate(startToday.getDate() - i);
-        const key = toDateKey(d);
-        trendSeed.set(key, {
-          dateKey: key,
-          label: toShortDateLabel(d),
-          orders: 0,
-          revenue: 0
-        });
-      }
-
-      const [
-        ordersRes,
-        directTotalRes,
-        directConfirmedRes,
-        directFailedRes,
-        directCancelledRes,
-        directPendingRes,
-        directPendingExpiredRes
-      ] = await Promise.all([
-        supabase
-          .from("orders")
-          .select("product_id, price, quantity, created_at")
-          .gte("created_at", start60.toISOString()),
-        supabase.from("direct_orders").select("id", { count: "exact", head: true }),
-        supabase.from("direct_orders").select("id", { count: "exact", head: true }).eq("status", "confirmed"),
-        supabase.from("direct_orders").select("id", { count: "exact", head: true }).eq("status", "failed"),
-        supabase.from("direct_orders").select("id", { count: "exact", head: true }).eq("status", "cancelled"),
-        supabase.from("direct_orders").select("id", { count: "exact", head: true }).eq("status", "pending"),
-        supabase
-          .from("direct_orders")
-          .select("id", { count: "exact", head: true })
-          .eq("status", "pending")
-          .lt("created_at", pendingExpiredBefore)
-      ]);
-
-      if (ordersRes.error) {
-        setError(ordersRes.error.message);
-        setLoading(false);
-        return;
-      }
-
-      const rows = (ordersRes.data as OrderMetricRow[]) || [];
-
-      let todayRevenue = 0;
-      let yesterdayRevenue = 0;
-      let last7Revenue = 0;
-      let previous7Revenue = 0;
-      let last30Revenue = 0;
-
-      let ordersToday = 0;
-      let ordersLast7 = 0;
-      let ordersLast30 = 0;
-      let quantityLast30 = 0;
-
-      const topByProduct = new Map<
-        string,
-        { productId: string; orders: number; quantity: number; revenue: number }
-      >();
-
-      for (const row of rows) {
-        if (!row.created_at) continue;
-        const created = new Date(row.created_at);
-        if (Number.isNaN(created.getTime())) continue;
-
-        const price = Number(row.price || 0);
-        const quantity = Number(row.quantity || 0);
-
-        if (created >= startToday) {
-          todayRevenue += price;
-          ordersToday += 1;
-        } else if (created >= startYesterday && created < startToday) {
-          yesterdayRevenue += price;
-        }
-
-        if (created >= start7) {
-          last7Revenue += price;
-          ordersLast7 += 1;
-        } else if (created >= startPrev7 && created < start7) {
-          previous7Revenue += price;
-        }
-
-        if (created >= start30) {
-          last30Revenue += price;
-          ordersLast30 += 1;
-          quantityLast30 += quantity;
-
-          const productId = row.product_id !== null && row.product_id !== undefined ? String(row.product_id) : "-";
-          const current = topByProduct.get(productId) || {
-            productId,
-            orders: 0,
-            quantity: 0,
-            revenue: 0
-          };
-          current.orders += 1;
-          current.quantity += quantity;
-          current.revenue += price;
-          topByProduct.set(productId, current);
-        }
-
-        const trendKey = toDateKey(created);
-        const trendRow = trendSeed.get(trendKey);
-        if (trendRow) {
-          trendRow.orders += 1;
-          trendRow.revenue += price;
-        }
-      }
-
-      setRevenue({
-        today: todayRevenue,
-        yesterday: yesterdayRevenue,
-        last7: last7Revenue,
-        previous7: previous7Revenue,
-        last30: last30Revenue
-      });
-
-      setOrderOps({
-        ordersToday,
-        ordersLast7,
-        ordersLast30,
-        averageOrderValue30: ordersLast30 > 0 ? last30Revenue / ordersLast30 : 0,
-        averageQuantity30: ordersLast30 > 0 ? quantityLast30 / ordersLast30 : 0
-      });
-
-      const total = directTotalRes.count ?? 0;
-      const confirmed = directConfirmedRes.count ?? 0;
-      const failed = directFailedRes.count ?? 0;
-      const cancelled = directCancelledRes.count ?? 0;
-      const pending = directPendingRes.count ?? 0;
-      const pendingExpired = directPendingExpiredRes.count ?? 0;
-      const processed = confirmed + failed + cancelled;
-      const failedOverall = failed + cancelled;
-
-      setDirectOrderStats({
-        total,
-        confirmed,
-        failed,
-        cancelled,
-        pending,
-        pendingExpired,
-        confirmedRate: processed > 0 ? (confirmed / processed) * 100 : 0,
-        failedRate: processed > 0 ? (failedOverall / processed) * 100 : 0
-      });
-
-      setDailyTrend(Array.from(trendSeed.values()));
-
-      const sortedTop = Array.from(topByProduct.values())
-        .sort((a, b) => {
-          if (b.revenue !== a.revenue) return b.revenue - a.revenue;
-          if (b.quantity !== a.quantity) return b.quantity - a.quantity;
-          return b.orders - a.orders;
-        })
-        .slice(0, 8);
-
-      const topIds = sortedTop
-        .map((row) => row.productId)
-        .filter((id) => id !== "-");
-
-      const productNamesById: Record<string, string> = {};
-      if (topIds.length) {
-        const { data: productRows } = await supabase.from("products").select("id, name").in("id", topIds);
-        for (const product of productRows ?? []) {
-          const id = (product as { id: number | string }).id;
-          const name = (product as { name: string }).name;
-          if (id !== null && id !== undefined) {
-            productNamesById[String(id)] = name;
+      try {
+        const params: ReportsSnapshotParams =
+          selectedPeriod === "custom_month"
+            ? {
+                period: selectedPeriod,
+                month: selectedMonth,
+                compareMonth: compareMonth || undefined
+              }
+            : { period: selectedPeriod };
+        const snapshot: ReportsSnapshot = await fetchReportsSnapshot(params);
+        setResolvedPeriod(snapshot.period);
+        setPeriodLabel(snapshot.periodLabel);
+        setComparisonLabel(snapshot.comparisonLabel);
+        setHasComparison(snapshot.hasComparison);
+        if (snapshot.period === "custom_month") {
+          if (snapshot.selectedMonth && snapshot.selectedMonth !== selectedMonth) {
+            setSelectedMonth(snapshot.selectedMonth);
+          }
+          if (snapshot.comparisonMonth && snapshot.comparisonMonth !== compareMonth) {
+            setCompareMonth(snapshot.comparisonMonth);
           }
         }
+        setRevenue(snapshot.revenue);
+        setOrderOps(snapshot.orderOps);
+        setDirectOrderStats(snapshot.directOrderStats);
+        setDailyTrend(snapshot.dailyTrend);
+        setTopProducts(snapshot.topProducts);
+      } catch (loadError) {
+        setError(loadError instanceof Error ? loadError.message : "Không thể tải báo cáo.");
+      } finally {
+        setLoading(false);
       }
-
-      const topRows: TopProductRow[] = sortedTop.map((row) => ({
-        productId: row.productId,
-        productName: productNamesById[row.productId] || `#${row.productId}`,
-        orders: row.orders,
-        quantity: row.quantity,
-        revenue: row.revenue
-      }));
-      setTopProducts(topRows);
-
-      setLoading(false);
     };
 
     load();
-  }, []);
+  }, [selectedPeriod, selectedMonth, compareMonth]);
 
-  const todayDelta = useMemo(
-    () => calcDeltaPercent(revenue.today, revenue.yesterday),
-    [revenue.today, revenue.yesterday]
+  const revenueDeltaPercent = useMemo(
+    () => revenue.deltaPercent || calcDeltaPercent(revenue.current, revenue.previous),
+    [revenue.current, revenue.deltaPercent, revenue.previous]
   );
-  const weekDelta = useMemo(
-    () => calcDeltaPercent(revenue.last7, revenue.previous7),
-    [revenue.last7, revenue.previous7]
+
+  const revenueDeltaAmount = useMemo(
+    () => revenue.deltaAmount || revenue.current - revenue.previous,
+    [revenue.current, revenue.deltaAmount, revenue.previous]
   );
+
+  const trendTitle =
+    resolvedPeriod === "all_time"
+      ? "Xu hướng theo tháng trong toàn thời gian"
+      : `Xu hướng trong ${periodLabel.toLowerCase()}`;
+
+  const topProductsTitle =
+    resolvedPeriod === "all_time"
+      ? "Top sản phẩm toàn thời gian (theo doanh thu)"
+      : `Top sản phẩm trong ${periodLabel.toLowerCase()} (theo doanh thu)`;
+
+  const comparisonSummary = hasComparison
+    ? `So với ${comparisonLabel.toLowerCase()}: ${formatMoneyDelta(revenueDeltaAmount)} VND (${formatDeltaPercent(
+        revenueDeltaPercent
+      )})`
+    : "Không áp dụng so sánh kỳ trước.";
 
   return (
     <div className="grid" style={{ gap: 24 }}>
@@ -336,6 +283,65 @@ export default function ReportsPage() {
         <div>
           <h1 className="page-title">Reports</h1>
           <p className="muted">Báo cáo vận hành và hiệu suất bán hàng.</p>
+        </div>
+      </div>
+
+      <div className="card report-filter-card">
+        <div className="report-filter-stack">
+          <div className="segmented" role="tablist" aria-label="Report period">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={selectedPeriod === "today"}
+              className={`segmented-button ${selectedPeriod === "today" ? "active" : ""}`}
+              onClick={() => setSelectedPeriod("today")}
+            >
+              Hôm nay
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={selectedPeriod === "month"}
+              className={`segmented-button ${selectedPeriod === "month" ? "active" : ""}`}
+              onClick={() => setSelectedPeriod("month")}
+            >
+              Tháng này
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={selectedPeriod === "quarter"}
+              className={`segmented-button ${selectedPeriod === "quarter" ? "active" : ""}`}
+              onClick={() => setSelectedPeriod("quarter")}
+            >
+              Quý này
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={selectedPeriod === "custom_month"}
+              className={`segmented-button ${selectedPeriod === "custom_month" ? "active" : ""}`}
+              onClick={() => setSelectedPeriod("custom_month")}
+            >
+              Theo tháng
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={selectedPeriod === "all_time"}
+              className={`segmented-button ${selectedPeriod === "all_time" ? "active" : ""}`}
+              onClick={() => setSelectedPeriod("all_time")}
+            >
+              Từ trước đến nay
+            </button>
+          </div>
+
+          {selectedPeriod === "custom_month" && (
+            <div className="report-picker-row">
+              <MonthOnlyPicker label="Tháng báo cáo" value={selectedMonth} onChange={setSelectedMonth} />
+              <MonthOnlyPicker label="So sánh với tháng" value={compareMonth} onChange={setCompareMonth} />
+            </div>
+          )}
         </div>
       </div>
 
@@ -347,44 +353,27 @@ export default function ReportsPage() {
 
       <div className="grid stats">
         <div className="card">
-          <p className="muted">Doanh thu hôm nay</p>
-          <h2>{revenue.today.toLocaleString("vi-VN")}</h2>
+          <p className="muted">Doanh thu {periodLabel.toLowerCase()}</p>
+          <h2>{formatCurrency(revenue.current)}</h2>
           <p className="muted" style={{ marginTop: 4 }}>
-            So với hôm qua: {formatDelta(todayDelta)}
+            {comparisonSummary}
           </p>
         </div>
         <div className="card">
-          <p className="muted">Doanh thu 7 ngày</p>
-          <h2>{revenue.last7.toLocaleString("vi-VN")}</h2>
+          <p className="muted">Số đơn {periodLabel.toLowerCase()}</p>
+          <h2>{orderOps.orderCount.toLocaleString("vi-VN")}</h2>
           <p className="muted" style={{ marginTop: 4 }}>
-            So với 7 ngày trước: {formatDelta(weekDelta)}
+            {hasComparison
+              ? `Doanh thu ${comparisonLabel.toLowerCase()}: ${formatCurrency(revenue.previous)}`
+              : "Thống kê lũy kế toàn bộ đơn hàng đã hoàn tất."}
           </p>
         </div>
         <div className="card">
-          <p className="muted">Doanh thu 30 ngày</p>
-          <h2>{revenue.last30.toLocaleString("vi-VN")}</h2>
+          <p className="muted">AOV {periodLabel.toLowerCase()}</p>
+          <h2>{formatCurrency(orderOps.averageOrderValue)}</h2>
           <p className="muted" style={{ marginTop: 4 }}>
-            AOV 30 ngày: {Math.round(orderOps.averageOrderValue30).toLocaleString("vi-VN")}
+            SL trung bình / đơn: {orderOps.averageQuantity.toFixed(2)}
           </p>
-        </div>
-      </div>
-
-      <div className="grid stats">
-        <div className="card">
-          <p className="muted">Số đơn hôm nay</p>
-          <h2>{orderOps.ordersToday.toLocaleString("vi-VN")}</h2>
-        </div>
-        <div className="card">
-          <p className="muted">Số đơn 7 ngày</p>
-          <h2>{orderOps.ordersLast7.toLocaleString("vi-VN")}</h2>
-        </div>
-        <div className="card">
-          <p className="muted">Số đơn 30 ngày</p>
-          <h2>{orderOps.ordersLast30.toLocaleString("vi-VN")}</h2>
-        </div>
-        <div className="card">
-          <p className="muted">SL account TB / đơn (30d)</p>
-          <h2>{orderOps.averageQuantity30.toFixed(2)}</h2>
         </div>
       </div>
 
@@ -417,11 +406,11 @@ export default function ReportsPage() {
       </div>
 
       <div className="card">
-        <h3 className="section-title">Xu hướng 7 ngày gần nhất</h3>
+        <h3 className="section-title">{trendTitle}</h3>
         <table className="table">
           <thead>
             <tr>
-              <th>Ngày</th>
+              <th>{resolvedPeriod === "all_time" ? "Tháng" : "Ngày"}</th>
               <th>Số đơn</th>
               <th>Doanh thu (VND)</th>
             </tr>
@@ -446,7 +435,7 @@ export default function ReportsPage() {
       </div>
 
       <div className="card">
-        <h3 className="section-title">Top sản phẩm 30 ngày (theo doanh thu)</h3>
+        <h3 className="section-title">{topProductsTitle}</h3>
         <table className="table">
           <thead>
             <tr>

@@ -1,31 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { requireAdminSession } from "@/app/api/_shared/adminAuth";
+import {
+  DirectOrderFulfillmentError,
+  fulfillBotDirectOrder
+} from "@/app/api/_shared/directOrderFulfillment";
 import { sendPaymentRelayNotification } from "@/app/api/_shared/paymentRelay";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 const botToken = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || "";
 const MAX_MESSAGE_LENGTH = 4096;
 const rawExpireMinutes = Number(process.env.DIRECT_ORDER_PENDING_EXPIRE_MINUTES || "10");
 const DIRECT_ORDER_PENDING_EXPIRE_MINUTES = Number.isFinite(rawExpireMinutes)
   ? Math.max(1, rawExpireMinutes)
   : 10;
-const DIRECT_ORDER_PENDING_EXPIRE_MS = DIRECT_ORDER_PENDING_EXPIRE_MINUTES * 60 * 1000;
-
-const buildSupabaseClient = (token?: string) =>
-  createClient(supabaseUrl, supabaseAnonKey, {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false
-    },
-    global: token
-      ? {
-          headers: {
-            Authorization: `Bearer ${token}`
-          }
-        }
-      : undefined
-  });
 
 const sendTelegramMessage = async (chatId: number, text: string) => {
   const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
@@ -72,6 +58,45 @@ const formatDescriptionBlock = (description: string | null | undefined, label = 
   return `${label}:\n${cleaned}\n\n`;
 };
 
+const buildDisplayName = (user?: {
+  first_name?: string | null;
+  last_name?: string | null;
+  username?: string | null;
+} | null) => {
+  const firstName = String(user?.first_name || "").trim();
+  const lastName = String(user?.last_name || "").trim();
+  const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+  if (fullName) {
+    return fullName;
+  }
+  const username = String(user?.username || "").trim().replace(/^@+/, "");
+  return username ? `@${username}` : "-";
+};
+
+const buildSuccessSummaryText = ({
+  productName,
+  deliveredQuantity,
+  totalText,
+  bonusQuantity = 0
+}: {
+  productName: string;
+  deliveredQuantity: number;
+  totalText: string;
+  bonusQuantity?: number;
+}) => {
+  const lines = [
+    "✅ Thanh toán thành công!",
+    "",
+    `🧾 Loại hàng: ${productName}`,
+    `📦 Số lượng: ${deliveredQuantity}`,
+    `💰 Tổng: ${totalText}`
+  ];
+  if (bonusQuantity > 0) {
+    lines.push(`🎁 Tặng thêm: ${bonusQuantity}`);
+  }
+  return lines.join("\n");
+};
+
 const buildFormattedItems = (items: string[], formatData?: string | null, html = false) => {
   const labels = (formatData || "")
     .split(",")
@@ -93,25 +118,25 @@ const buildFormattedItems = (items: string[], formatData?: string | null, html =
   });
 };
 
-const isDirectOrderExpired = (createdAt: string | null | undefined) => {
-  if (!createdAt) return false;
-  const created = new Date(createdAt);
-  if (Number.isNaN(created.getTime())) return false;
-  return Date.now() - created.getTime() >= DIRECT_ORDER_PENDING_EXPIRE_MS;
+const buildDeliveryMessageText = ({
+  successText,
+  items,
+  formatData,
+  description
+}: {
+  successText: string;
+  items: string[];
+  formatData?: string | null;
+  description?: string | null;
+}) => {
+  const descriptionBlock = formatDescriptionBlock(description);
+  const itemsFormatted = buildFormattedItems(items, formatData, true).join("\n\n");
+  return `${successText}\n\n${descriptionBlock}🔐 Account:\n${itemsFormatted}`.slice(0, MAX_MESSAGE_LENGTH);
 };
 
 export async function POST(request: NextRequest) {
-  if (!supabaseUrl || !supabaseAnonKey) {
-    return NextResponse.json({ error: "Supabase env missing." }, { status: 500 });
-  }
   if (!botToken) {
     return NextResponse.json({ error: "BOT_TOKEN missing." }, { status: 500 });
-  }
-
-  const authHeader = request.headers.get("authorization") || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-  if (!token) {
-    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
 
   let body: { orderId?: number | string };
@@ -126,160 +151,89 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "orderId is required." }, { status: 400 });
   }
 
-  const authClient = buildSupabaseClient();
-  const { data: userData, error: userError } = await authClient.auth.getUser(token);
-  if (userError || !userData.user) {
-    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+  const adminSession = await requireAdminSession(request);
+  if (adminSession.ok === false) {
+    return adminSession.response;
   }
 
-  const supabase = buildSupabaseClient(token);
-  const { data: adminRow, error: adminError } = await supabase
-    .from("admin_users")
-    .select("role")
-    .eq("user_id", userData.user.id)
-    .maybeSingle();
-
-  if (adminError || !adminRow) {
-    return NextResponse.json({ error: "Forbidden." }, { status: 403 });
-  }
-
-  const { data: directOrder, error: directOrderError } = await supabase
-    .from("direct_orders")
-    .select("id, user_id, product_id, quantity, bonus_quantity, unit_price, amount, code, status, created_at")
-    .eq("id", orderId)
-    .maybeSingle();
-
-  if (directOrderError || !directOrder) {
-    return NextResponse.json({ error: "Order not found." }, { status: 404 });
-  }
-
-  if (directOrder.status !== "pending") {
-    return NextResponse.json({ error: "Order already processed." }, { status: 400 });
-  }
-
-  if (isDirectOrderExpired(directOrder.created_at)) {
-    await supabase
-      .from("direct_orders")
-      .update({ status: "cancelled" })
-      .eq("id", directOrder.id);
-    return NextResponse.json(
-      { error: `Order expired after ${DIRECT_ORDER_PENDING_EXPIRE_MINUTES} minutes.` },
-      { status: 409 }
+  const orderGroup = `MANUAL${Date.now()}`;
+  let fulfillment;
+  try {
+    fulfillment = await fulfillBotDirectOrder(
+      adminSession.supabase,
+      orderId,
+      DIRECT_ORDER_PENDING_EXPIRE_MINUTES,
+      orderGroup
     );
+  } catch (error) {
+    if (error instanceof DirectOrderFulfillmentError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+    return NextResponse.json({ error: "Failed to fulfill order." }, { status: 500 });
   }
 
-  const { data: product } = await supabase
-    .from("products")
-    .select("id, name, description, format_data")
-    .eq("id", directOrder.product_id)
+  const productName = fulfillment.product_name;
+  const bonusQuantity = Number(fulfillment.bonus_quantity || 0);
+  const items = fulfillment.items;
+  const totalPrice = Number(fulfillment.amount || 0);
+  const { data: userProfile } = await adminSession.supabase
+    .from("users")
+    .select("first_name, last_name, username")
+    .eq("user_id", fulfillment.user_id)
     .maybeSingle();
-  const productName = String(product?.name || `#${directOrder.product_id}`).trim();
+  const displayName = buildDisplayName(userProfile);
 
-  const bonusQuantity = Number(directOrder.bonus_quantity || 0);
-  const deliverQuantity = Math.max(
-    1,
-    Number(directOrder.quantity || 0) + (bonusQuantity > 0 ? bonusQuantity : 0)
-  );
-
-  const { data: stockRows, error: stockError } = await supabase
-    .from("stock")
-    .select("id, content")
-    .eq("product_id", directOrder.product_id)
-    .eq("sold", false)
-    .order("id", { ascending: true })
-    .limit(deliverQuantity);
-
-  if (stockError || !stockRows || stockRows.length < deliverQuantity) {
-    await supabase
-      .from("direct_orders")
-      .update({ status: "failed" })
-      .eq("id", directOrder.id);
-    return NextResponse.json({ error: "Not enough stock." }, { status: 409 });
-  }
-
-  const stockIds = stockRows.map((row) => row.id);
-  const items = stockRows.map((row) => row.content);
-
-  const { error: updateStockError } = await supabase
-    .from("stock")
-    .update({ sold: true })
-    .in("id", stockIds);
-
-  if (updateStockError) {
-    return NextResponse.json({ error: "Failed to update stock." }, { status: 500 });
-  }
-
-  const orderGroup = `MANUAL${directOrder.user_id}${new Date().toISOString().replace(/[-:.TZ]/g, "")}`;
-  const totalPrice = Number(directOrder.amount || 0) || (Number(directOrder.unit_price || 0) * Number(directOrder.quantity || 0));
-
-  const { error: createOrderError } = await supabase.from("orders").insert({
-    user_id: directOrder.user_id,
-    product_id: directOrder.product_id,
-    content: JSON.stringify(items),
-    price: totalPrice,
-    quantity: items.length,
-    order_group: orderGroup,
-    created_at: new Date().toISOString()
-  });
-
-  if (createOrderError) {
-    return NextResponse.json({ error: "Failed to create order." }, { status: 500 });
-  }
-
-  const { error: updateDirectOrderError } = await supabase
-    .from("direct_orders")
-    .update({ status: "confirmed" })
-    .eq("id", directOrder.id);
-
-  if (updateDirectOrderError) {
-    return NextResponse.json({ error: "Failed to update direct order." }, { status: 500 });
-  }
-
-  await sendPaymentRelayNotification(supabase, [
+  await sendPaymentRelayNotification(adminSession.supabase, [
     "✅ Thanh toán thành công (Duyệt tay Bot)",
-    `Mã đơn: ${directOrder.id}`,
-    `Mã người dùng: ${directOrder.user_id}`,
-    `Mã thanh toán: ${directOrder.code}`,
-    `Số tiền: ${totalPrice.toLocaleString("vi-VN")}đ`,
+    `Mã đơn hệ thống: ${fulfillment.direct_order_id}`,
+    `Mã người dùng: ${fulfillment.user_id}`,
+    `Tên người dùng: ${displayName}`,
+    `Mã thanh toán: ${fulfillment.code}`,
+    "",
+    `Số tiền nhận: ${totalPrice.toLocaleString("vi-VN")}đ`,
+    `Số tiền kỳ vọng: ${totalPrice.toLocaleString("vi-VN")}đ`,
+    "",
     `Sản phẩm: ${productName}`,
-    `SL thanh toán: ${directOrder.quantity}`,
+    `SL thanh toán: ${fulfillment.quantity}`,
     `SL giao: ${items.length}`,
     `SL khuyến mãi: ${bonusQuantity}`
   ]);
 
-  const description = product?.description || "";
-  const totalText = `${directOrder.amount?.toLocaleString?.() ?? directOrder.amount ?? totalPrice}đ`;
-  const descriptionBlock = formatDescriptionBlock(description);
-
-  const successText =
-    `✅ Thanh toán thành công!\n\n` +
-    `🧾 ${productName} | SL: ${items.length}\n` +
-    `💰 Tổng: ${totalText}`;
-  const bonusLine = bonusQuantity > 0 ? `\n🎁 Tặng thêm: ${bonusQuantity}` : "";
-
-  const itemsFormatted = buildFormattedItems(items, product?.format_data, true).join("\n\n");
-  const messageText = `${successText}${bonusLine}\n\n${descriptionBlock}🔐 Account:\n${itemsFormatted}`.slice(0, MAX_MESSAGE_LENGTH);
+  const description = fulfillment.description || "";
+  const totalText = `${totalPrice.toLocaleString("vi-VN")}đ`;
+  const successText = buildSuccessSummaryText({
+    productName,
+    deliveredQuantity: items.length,
+    totalText,
+    bonusQuantity
+  });
+  const messageText = buildDeliveryMessageText({
+    successText,
+    items,
+    formatData: fulfillment.format_data,
+    description
+  });
 
   let sent = false;
   if (items.length > 5 || messageText.length >= MAX_MESSAGE_LENGTH - 50) {
     const headerLines = [
-      `Sản phẩm: ${productName}`,
+      `Loại hàng: ${productName}`,
       `Số lượng: ${items.length}`,
-      `SL thanh toán: ${directOrder.quantity}`,
-      `Tổng tiền: ${totalText}`
+      `SL thanh toán: ${fulfillment.quantity}`,
+      `Tổng: ${totalText}`
     ];
     if (bonusQuantity > 0) {
-      headerLines.push(`SL khuyến mãi: ${bonusQuantity}`);
+      headerLines.push(`Tặng thêm: ${bonusQuantity}`);
     }
     if (description) {
       headerLines.push(`Mô tả: ${description}`);
     }
-    const fileItems = buildFormattedItems(items, product?.format_data, false);
+    const fileItems = buildFormattedItems(items, fulfillment.format_data, false);
     const fileContent = `${headerLines.join("\n")}\n${"=".repeat(40)}\n\n${fileItems.join("\n\n")}`;
     const filename = `${productName}_${items.length}.txt`;
-    sent = await sendTelegramDocument(directOrder.user_id, filename, fileContent, successText);
+    sent = await sendTelegramDocument(fulfillment.user_id, filename, fileContent, successText);
   } else {
-    sent = await sendTelegramMessage(directOrder.user_id, messageText);
+    sent = await sendTelegramMessage(fulfillment.user_id, messageText);
   }
 
   if (!sent) {

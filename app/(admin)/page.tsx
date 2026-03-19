@@ -1,106 +1,29 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { supabase } from "@/lib/supabaseClient";
-
-type Stats = { users: number; orders: number; revenue: number };
-
-type OrderRow = {
-  id: number | string;
-  user_id: number | string;
-  product_id: number | string;
-  price: number;
-  quantity: number;
-  created_at: string;
-};
+import {
+  fetchDashboardSnapshot,
+  type DashboardOrderRow,
+  type DashboardSnapshot,
+  type DashboardStats
+} from "@/lib/adminAnalyticsClient";
 
 export default function DashboardPage() {
-  const [stats, setStats] = useState<Stats>({ users: 0, orders: 0, revenue: 0 });
-  const [orders, setOrders] = useState<OrderRow[]>([]);
-  const [usernamesByUserId, setUsernamesByUserId] = useState<Record<string, string | null>>({});
-  const [productNamesById, setProductNamesById] = useState<Record<string, string>>({});
+  const [stats, setStats] = useState<DashboardStats>({ users: 0, orders: 0, revenue: 0 });
+  const [orders, setOrders] = useState<DashboardOrderRow[]>([]);
   const [pendingDeposits, setPendingDeposits] = useState(0);
   const [pendingWithdrawals, setPendingWithdrawals] = useState(0);
 
   useEffect(() => {
     const load = async () => {
-      const [usersCountRes, ordersDataRes] = await Promise.all([
-        supabase.from("users").select("user_id", { count: "exact", head: true }),
-        supabase
-          .from("orders")
-          .select("id, user_id, product_id, price, quantity, created_at")
-          .order("created_at", { ascending: false })
-          .limit(5000)
-      ]);
-
-      const allOrders = (ordersDataRes.data as OrderRow[]) || [];
-      const revenue = allOrders.reduce((sum, row) => sum + Number(row.price || 0), 0);
-      setStats({
-        users: usersCountRes.count ?? 0,
-        orders: allOrders.length,
-        revenue
-      });
-
-      const latestOrders = allOrders.slice(0, 6);
-      setOrders(latestOrders);
-
-      // Fetch usernames and product names for the visible rows (keeps the dashboard query simple).
-      const userIds = Array.from(
-        new Set(
-          latestOrders
-            .map((o) => o.user_id)
-            .filter((v): v is number | string => v !== null && v !== undefined)
-            .map(String)
-        )
-      );
-      const productIds = Array.from(
-        new Set(
-          latestOrders
-            .map((o) => o.product_id)
-            .filter((v): v is number | string => v !== null && v !== undefined)
-            .map(String)
-        )
-      );
-
-      const [usersRes, productsRes] = await Promise.all([
-        userIds.length
-          ? supabase.from("users").select("user_id, username").in("user_id", userIds)
-          : Promise.resolve({ data: [] as Array<{ user_id: number | string; username: string | null }> }),
-        productIds.length
-          ? supabase.from("products").select("id, name").in("id", productIds)
-          : Promise.resolve({ data: [] as Array<{ id: number | string; name: string }> })
-      ]);
-
-      const usernames: Record<string, string | null> = {};
-      for (const u of usersRes.data ?? []) {
-        if (u?.user_id !== null && u?.user_id !== undefined) {
-          usernames[String(u.user_id)] = u.username ?? null;
-        }
-      }
-      setUsernamesByUserId(usernames);
-
-      const productNames: Record<string, string> = {};
-      for (const p of productsRes.data ?? []) {
-        if (p?.id !== null && p?.id !== undefined) {
-          productNames[String(p.id)] = p.name;
-        }
-      }
-      setProductNamesById(productNames);
-
-      const { data: depositsData } = await supabase
-        .from("deposits")
-        .select("id")
-        .eq("status", "pending");
-      setPendingDeposits(depositsData?.length ?? 0);
-
-      const { data: withdrawalsData } = await supabase
-        .from("withdrawals")
-        .select("id")
-        .eq("status", "pending");
-      setPendingWithdrawals(withdrawalsData?.length ?? 0);
+      const snapshot: DashboardSnapshot = await fetchDashboardSnapshot();
+      setStats(snapshot.stats);
+      setOrders(snapshot.orders);
+      setPendingDeposits(snapshot.pendingDeposits);
+      setPendingWithdrawals(snapshot.pendingWithdrawals);
     };
 
-    load();
+    load().catch(() => null);
   }, []);
 
   const formatDateTime = (isoString: string | null | undefined) => {
@@ -158,6 +81,7 @@ export default function DashboardPage() {
               <th>ID</th>
               <th>UserID</th>
               <th>Username</th>
+              <th>Tên người dùng</th>
               <th>Sản phẩm</th>
               <th>SL</th>
               <th>Giá</th>
@@ -169,8 +93,9 @@ export default function DashboardPage() {
               <tr key={order.id}>
                 <td>#{order.id}</td>
                 <td>{order.user_id}</td>
-                <td>{usernamesByUserId[String(order.user_id)] || "-"}</td>
-                <td>{productNamesById[String(order.product_id)] || order.product_id}</td>
+                <td>{order.username || "-"}</td>
+                <td>{order.display_name || "-"}</td>
+                <td>{order.product_name || order.product_id}</td>
                 <td>{order.quantity}</td>
                 <td>{order.price.toLocaleString("vi-VN")}</td>
                 <td>{formatDateTime(order.created_at)}</td>
@@ -178,7 +103,7 @@ export default function DashboardPage() {
             ))}
             {!orders.length && (
               <tr>
-                <td colSpan={7} className="muted">
+                <td colSpan={8} className="muted">
                   Chưa có đơn hàng.
                 </td>
               </tr>

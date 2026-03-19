@@ -1,11 +1,14 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
 interface Product {
   id: number;
   name: string;
+  is_hidden?: boolean;
+  is_deleted?: boolean;
+  sort_position?: number | null;
 }
 
 interface StockItem {
@@ -57,6 +60,7 @@ const AVAILABLE_CUSTOM_CONCURRENCY = [5, 10, 20, 50];
 export default function StockPage() {
   const PAGE_SIZE = 100;
   const [products, setProducts] = useState<Product[]>([]);
+  const [productTab, setProductTab] = useState<"active" | "inactive">("active");
   const [selectedProductId, setSelectedProductId] = useState<string>("");
   const [stockItems, setStockItems] = useState<StockItem[]>([]);
   const [stockSummary, setStockSummary] = useState<StockSummary>({ total: 0, sold: 0, remaining: 0 });
@@ -101,9 +105,34 @@ export default function StockPage() {
   const [customSubjectHistory, setCustomSubjectHistory] = useState<string[]>([]);
   const [customConcurrencyHistory, setCustomConcurrencyHistory] = useState<number[]>([]);
 
+  const filteredProducts = useMemo(() => {
+    const sorted = [...products].sort((a, b) => {
+      const aPos = Number.isFinite(a.sort_position as number) ? Number(a.sort_position) : Number.MAX_SAFE_INTEGER;
+      const bPos = Number.isFinite(b.sort_position as number) ? Number(b.sort_position) : Number.MAX_SAFE_INTEGER;
+      if (aPos !== bPos) return aPos - bPos;
+      return a.id - b.id;
+    });
+
+    return sorted.filter((product) =>
+      productTab === "active"
+        ? !product.is_hidden && !product.is_deleted
+        : Boolean(product.is_hidden) || Boolean(product.is_deleted)
+    );
+  }, [productTab, products]);
+
   const loadProducts = async () => {
-    const { data } = await supabase.from("products").select("id, name").order("id");
-    setProducts((data as Product[]) || []);
+    const { data } = await supabase.from("products").select("*").order("id");
+    const rows = ((data as Array<Record<string, unknown>>) || []).map((row) => ({
+      id: Number(row.id),
+      name: String(row.name || `#${String(row.id || "")}`),
+      is_hidden: Boolean(row.is_hidden),
+      is_deleted: Boolean(row.is_deleted),
+      sort_position:
+        row.sort_position === null || row.sort_position === undefined
+          ? null
+          : Number(row.sort_position)
+    }));
+    setProducts(rows);
   };
 
   const loadStock = async (productId: string, pageIndex = page) => {
@@ -224,6 +253,14 @@ export default function StockPage() {
   useEffect(() => {
     loadProducts();
   }, []);
+
+  useEffect(() => {
+    if (!selectedProductId) return;
+    const existsInTab = filteredProducts.some((product) => product.id === Number(selectedProductId));
+    if (!existsInTab) {
+      setSelectedProductId("");
+    }
+  }, [filteredProducts, selectedProductId]);
 
   useEffect(() => {
     try {
@@ -693,6 +730,26 @@ export default function StockPage() {
 
       <div className="card">
         <h3 className="section-title">Chọn sản phẩm</h3>
+        <div className="segmented" role="tablist" aria-label="Product filter tab" style={{ marginBottom: 12 }}>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={productTab === "active"}
+            className={`segmented-button ${productTab === "active" ? "active" : ""}`}
+            onClick={() => setProductTab("active")}
+          >
+            Đang hoạt động
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={productTab === "inactive"}
+            className={`segmented-button danger ${productTab === "inactive" ? "active" : ""}`}
+            onClick={() => setProductTab("inactive")}
+          >
+            Đã hủy, Ẩn
+          </button>
+        </div>
         <div className="form-grid">
           <select
             className="select"
@@ -700,13 +757,18 @@ export default function StockPage() {
             onChange={(event) => setSelectedProductId(event.target.value)}
           >
             <option value="">-- Chọn sản phẩm --</option>
-            {products.map((product) => (
+            {filteredProducts.map((product) => (
               <option key={product.id} value={product.id}>
                 {product.name}
               </option>
             ))}
           </select>
         </div>
+        {!filteredProducts.length && (
+          <p className="muted" style={{ marginTop: 8 }}>
+            Không có sản phẩm trong nhóm {productTab === "active" ? "đang hoạt động" : "đã hủy, ẩn"}.
+          </p>
+        )}
         {selectedProductId && (
           <div className="grid stats" style={{ marginTop: 12 }}>
             <div className="card" style={{ boxShadow: "none", padding: 14 }}>

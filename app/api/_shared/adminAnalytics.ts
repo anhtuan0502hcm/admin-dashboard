@@ -1,0 +1,1095 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+type RpcObject = Record<string, unknown> | null;
+
+export type DashboardStats = {
+  users: number;
+  orders: number;
+  revenue: number;
+};
+
+export type DashboardOrderRow = {
+  id: number;
+  user_id: number;
+  username: string | null;
+  display_name: string | null;
+  product_id: number;
+  product_name: string;
+  price: number;
+  quantity: number;
+  created_at: string;
+};
+
+export type DashboardSnapshot = {
+  stats: DashboardStats;
+  pendingDeposits: number;
+  pendingWithdrawals: number;
+  orders: DashboardOrderRow[];
+};
+
+export type RevenueStats = {
+  current: number;
+  previous: number;
+  deltaAmount: number;
+  deltaPercent: number;
+};
+
+export type OrderOpsStats = {
+  orderCount: number;
+  averageOrderValue: number;
+  averageQuantity: number;
+};
+
+export type DirectOrderStats = {
+  total: number;
+  confirmed: number;
+  failed: number;
+  cancelled: number;
+  pending: number;
+  pendingExpired: number;
+  confirmedRate: number;
+  failedRate: number;
+};
+
+export type DailyTrendRow = {
+  dateKey: string;
+  label: string;
+  orders: number;
+  revenue: number;
+};
+
+export type TopProductRow = {
+  productId: string;
+  productName: string;
+  orders: number;
+  quantity: number;
+  revenue: number;
+};
+
+export type ReportsSnapshot = {
+  period: ReportsPeriod;
+  periodLabel: string;
+  comparisonLabel: string;
+  hasComparison: boolean;
+  selectedMonth: string | null;
+  comparisonMonth: string | null;
+  revenue: RevenueStats;
+  orderOps: OrderOpsStats;
+  directOrderStats: DirectOrderStats;
+  dailyTrend: DailyTrendRow[];
+  topProducts: TopProductRow[];
+};
+
+export type UserSnapshotRow = {
+  user_id: number;
+  username: string | null;
+  display_name: string | null;
+  balance: number;
+  balance_usdt: number;
+  language: string | null;
+  created_at: string | null;
+  order_count: number;
+  total_paid: number;
+};
+
+export type UsersSnapshot = {
+  users: UserSnapshotRow[];
+  page: number;
+  pageSize: number;
+  totalCount: number;
+  totalPages: number;
+};
+
+export type ReportsPeriod = "today" | "month" | "quarter" | "custom_month" | "all_time";
+
+export type ReportsSnapshotParams = {
+  period?: ReportsPeriod;
+  month?: string | null;
+  compareMonth?: string | null;
+};
+
+type OrderMetricRow = {
+  product_id: number | string | null;
+  price: number | null;
+  quantity: number | null;
+  created_at: string | null;
+};
+
+type DirectOrderMetricRow = {
+  status: string | null;
+  created_at: string | null;
+};
+
+type BaseUserRow = Record<string, unknown>;
+
+type UserProfileSummary = {
+  username: string | null;
+  display_name: string | null;
+};
+
+const TZ = "Asia/Ho_Chi_Minh";
+const HO_CHI_MINH_OFFSET_MS = 7 * 60 * 60 * 1000;
+const MONTH_KEY_PATTERN = /^(\d{4})-(\d{2})$/;
+
+const normalizeRpcData = (data: unknown): RpcObject => {
+  if (Array.isArray(data)) {
+    return (data[0] as RpcObject | undefined) ?? null;
+  }
+  return (data as RpcObject) ?? null;
+};
+
+const isMissingRpcError = (message: string) => {
+  const lowered = message.toLowerCase();
+  return (
+    lowered.includes("could not find the function") ||
+    lowered.includes("schema cache") ||
+    lowered.includes("pgrst202")
+  );
+};
+
+const toNumber = (value: unknown, fallback = 0) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+};
+
+const toOptionalString = (value: unknown) => {
+  if (value == null) return null;
+  const text = String(value);
+  return text.trim() ? text : null;
+};
+
+const buildDisplayName = (firstName: unknown, lastName: unknown) => {
+  const parts = [toOptionalString(firstName), toOptionalString(lastName)].filter(Boolean) as string[];
+  if (!parts.length) return null;
+  return parts.join(" ");
+};
+
+const toObjectArray = (value: unknown) =>
+  Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => !!item && typeof item === "object") : [];
+
+const calcDeltaPercent = (current: number, previous: number) => {
+  if (previous <= 0) return current > 0 ? 100 : 0;
+  return ((current - previous) / previous) * 100;
+};
+
+const toHoChiMinhDate = (value: Date) => new Date(value.getTime() + HO_CHI_MINH_OFFSET_MS);
+
+const getHoChiMinhParts = (value: Date) => {
+  const zoned = toHoChiMinhDate(value);
+  return {
+    year: zoned.getUTCFullYear(),
+    month: zoned.getUTCMonth() + 1,
+    day: zoned.getUTCDate()
+  };
+};
+
+const hoChiMinhDateToUtc = (year: number, month: number, day: number) =>
+  new Date(Date.UTC(year, month - 1, day) - HO_CHI_MINH_OFFSET_MS);
+
+const addHoChiMinhDays = (value: Date, amount: number) => {
+  const zoned = toHoChiMinhDate(value);
+  zoned.setUTCDate(zoned.getUTCDate() + amount);
+  return new Date(zoned.getTime() - HO_CHI_MINH_OFFSET_MS);
+};
+
+const startOfHoChiMinhDay = (value: Date) => {
+  const { year, month, day } = getHoChiMinhParts(value);
+  return hoChiMinhDateToUtc(year, month, day);
+};
+
+const startOfHoChiMinhMonth = (value: Date) => {
+  const { year, month } = getHoChiMinhParts(value);
+  return hoChiMinhDateToUtc(year, month, 1);
+};
+
+const startOfHoChiMinhQuarter = (value: Date) => {
+  const { year, month } = getHoChiMinhParts(value);
+  const quarterStartMonth = Math.floor((month - 1) / 3) * 3 + 1;
+  return hoChiMinhDateToUtc(year, quarterStartMonth, 1);
+};
+
+const formatMonthLabel = (value: Date) => {
+  const { year, month } = getHoChiMinhParts(value);
+  return `Tháng ${month}/${year}`;
+};
+
+const formatQuarterLabel = (value: Date) => {
+  const { year, month } = getHoChiMinhParts(value);
+  const quarter = Math.floor((month - 1) / 3) + 1;
+  return `Quý ${quarter}/${year}`;
+};
+
+const formatTodayLabel = () => "Hôm nay";
+const formatAllTimeLabel = () => "Từ trước đến nay";
+
+type MonthKeyParts = {
+  year: number;
+  month: number;
+  key: string;
+};
+
+type PeriodWindow = {
+  start: Date;
+  end: Date;
+  label: string;
+  monthKey: string | null;
+};
+
+type PeriodRange = {
+  period: ReportsPeriod;
+  periodLabel: string;
+  comparisonLabel: string;
+  selectedMonth: string | null;
+  comparisonMonth: string | null;
+  current: PeriodWindow;
+  comparison: PeriodWindow;
+};
+
+const formatMonthKey = (year: number, month: number) => `${year}-${String(month).padStart(2, "0")}`;
+
+const parseMonthKey = (value: string | null | undefined): MonthKeyParts | null => {
+  const match = MONTH_KEY_PATTERN.exec((value || "").trim());
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+    return null;
+  }
+
+  return {
+    year,
+    month,
+    key: formatMonthKey(year, month)
+  };
+};
+
+const getCurrentMonthKeyParts = (value: Date): MonthKeyParts => {
+  const { year, month } = getHoChiMinhParts(value);
+  return {
+    year,
+    month,
+    key: formatMonthKey(year, month)
+  };
+};
+
+const shiftMonthKey = (value: MonthKeyParts, delta: number): MonthKeyParts => {
+  const shifted = new Date(Date.UTC(value.year, value.month - 1 + delta, 1));
+  const year = shifted.getUTCFullYear();
+  const month = shifted.getUTCMonth() + 1;
+  return {
+    year,
+    month,
+    key: formatMonthKey(year, month)
+  };
+};
+
+const createMonthWindow = (value: MonthKeyParts, now: Date): PeriodWindow => {
+  const start = hoChiMinhDateToUtc(value.year, value.month, 1);
+  const nextStart =
+    value.month === 12
+      ? hoChiMinhDateToUtc(value.year + 1, 1, 1)
+      : hoChiMinhDateToUtc(value.year, value.month + 1, 1);
+  const endCandidate = new Date(nextStart.getTime() - 1);
+  const end =
+    start.getTime() > now.getTime()
+      ? new Date(start.getTime() - 1)
+      : endCandidate.getTime() > now.getTime()
+        ? now
+        : endCandidate;
+
+  return {
+    start,
+    end,
+    label: `Tháng ${value.month}/${value.year}`,
+    monthKey: value.key
+  };
+};
+
+const createRange = (
+  period: ReportsPeriod,
+  current: PeriodWindow,
+  comparison: PeriodWindow
+): PeriodRange => ({
+  period,
+  periodLabel: current.label,
+  comparisonLabel: comparison.label,
+  selectedMonth: current.monthKey,
+  comparisonMonth: comparison.monthKey,
+  current,
+  comparison
+});
+
+const getReportsPeriodRange = (
+  period: ReportsPeriod,
+  now: Date,
+  requestedMonth?: string | null,
+  requestedCompareMonth?: string | null
+): PeriodRange => {
+  if (period === "today") {
+    const currentStart = startOfHoChiMinhDay(now);
+    return createRange(
+      period,
+      {
+        start: currentStart,
+        end: now,
+        label: formatTodayLabel(),
+        monthKey: null
+      },
+      {
+        start: addHoChiMinhDays(currentStart, -1),
+        end: new Date(currentStart.getTime() - 1),
+        label: "Hôm qua",
+        monthKey: null
+      }
+    );
+  }
+
+  if (period === "quarter") {
+    const currentStart = startOfHoChiMinhQuarter(now);
+    const previousQuarterEnd = new Date(currentStart.getTime() - 1);
+    return createRange(
+      period,
+      {
+        start: currentStart,
+        end: now,
+        label: formatQuarterLabel(now),
+        monthKey: null
+      },
+      {
+        start: startOfHoChiMinhQuarter(previousQuarterEnd),
+        end: previousQuarterEnd,
+        label: formatQuarterLabel(previousQuarterEnd),
+        monthKey: null
+      }
+    );
+  }
+
+  if (period === "custom_month") {
+    const selectedMonth = parseMonthKey(requestedMonth) ?? getCurrentMonthKeyParts(now);
+    const compareMonth = parseMonthKey(requestedCompareMonth) ?? shiftMonthKey(selectedMonth, -1);
+    return createRange(
+      period,
+      createMonthWindow(selectedMonth, now),
+      createMonthWindow(compareMonth, now)
+    );
+  }
+
+  const currentMonth = getCurrentMonthKeyParts(now);
+  return createRange(
+    "month",
+    createMonthWindow(currentMonth, now),
+    createMonthWindow(shiftMonthKey(currentMonth, -1), now)
+  );
+};
+
+const normalizeDashboardSnapshot = (data: RpcObject): DashboardSnapshot => {
+  const stats = (data?.stats as Record<string, unknown> | undefined) ?? {};
+  return {
+    stats: {
+      users: toNumber(stats.users),
+      orders: toNumber(stats.orders),
+      revenue: toNumber(stats.revenue)
+    },
+    pendingDeposits: toNumber(data?.pendingDeposits),
+    pendingWithdrawals: toNumber(data?.pendingWithdrawals),
+    orders: toObjectArray(data?.orders).map((row) => ({
+      id: toNumber(row.id),
+      user_id: toNumber(row.user_id),
+      username: toOptionalString(row.username),
+      display_name: toOptionalString(row.display_name),
+      product_id: toNumber(row.product_id),
+      product_name: String(row.product_name || `#${toNumber(row.product_id)}`),
+      price: toNumber(row.price),
+      quantity: toNumber(row.quantity),
+      created_at: String(row.created_at || "")
+    }))
+  };
+};
+
+const normalizeReportsSnapshot = (data: RpcObject): ReportsSnapshot => {
+  const revenue = (data?.revenue as Record<string, unknown> | undefined) ?? {};
+  const orderOps = (data?.orderOps as Record<string, unknown> | undefined) ?? {};
+  const directOrderStats = (data?.directOrderStats as Record<string, unknown> | undefined) ?? {};
+
+  return {
+    period: (toOptionalString(data?.period) as ReportsPeriod | null) ?? "month",
+    periodLabel: String(data?.periodLabel || ""),
+    comparisonLabel: String(data?.comparisonLabel || ""),
+    hasComparison: Boolean(data?.hasComparison),
+    selectedMonth: toOptionalString(data?.selectedMonth),
+    comparisonMonth: toOptionalString(data?.comparisonMonth),
+    revenue: {
+      current: toNumber(revenue.current),
+      previous: toNumber(revenue.previous),
+      deltaAmount: toNumber(revenue.deltaAmount),
+      deltaPercent: toNumber(revenue.deltaPercent)
+    },
+    orderOps: {
+      orderCount: toNumber(orderOps.orderCount),
+      averageOrderValue: toNumber(orderOps.averageOrderValue),
+      averageQuantity: toNumber(orderOps.averageQuantity)
+    },
+    directOrderStats: {
+      total: toNumber(directOrderStats.total),
+      confirmed: toNumber(directOrderStats.confirmed),
+      failed: toNumber(directOrderStats.failed),
+      cancelled: toNumber(directOrderStats.cancelled),
+      pending: toNumber(directOrderStats.pending),
+      pendingExpired: toNumber(directOrderStats.pendingExpired),
+      confirmedRate: toNumber(directOrderStats.confirmedRate),
+      failedRate: toNumber(directOrderStats.failedRate)
+    },
+    dailyTrend: toObjectArray(data?.dailyTrend).map((row) => ({
+      dateKey: String(row.dateKey || ""),
+      label: String(row.label || ""),
+      orders: toNumber(row.orders),
+      revenue: toNumber(row.revenue)
+    })),
+    topProducts: toObjectArray(data?.topProducts).map((row) => ({
+      productId: String(row.productId || "-"),
+      productName: String(row.productName || `#${String(row.productId || "-")}`),
+      orders: toNumber(row.orders),
+      quantity: toNumber(row.quantity),
+      revenue: toNumber(row.revenue)
+    }))
+  };
+};
+
+const normalizeUsersSnapshot = (data: RpcObject): UsersSnapshot => ({
+  users: toObjectArray(data?.users).map((row) => ({
+    user_id: toNumber(row.user_id),
+    username: toOptionalString(row.username),
+    display_name: toOptionalString(row.display_name),
+    balance: toNumber(row.balance),
+    balance_usdt: toNumber(row.balance_usdt),
+    language: toOptionalString(row.language),
+    created_at: toOptionalString(row.created_at),
+    order_count: toNumber(row.order_count),
+    total_paid: toNumber(row.total_paid)
+  })),
+  page: toNumber(data?.page, 1),
+  pageSize: toNumber(data?.pageSize, 50),
+  totalCount: toNumber(data?.totalCount),
+  totalPages: toNumber(data?.totalPages, 1)
+});
+
+const toDateKey = (value: Date | string) =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(typeof value === "string" ? new Date(value) : value);
+
+const toShortDateLabel = (value: Date) =>
+  new Intl.DateTimeFormat("vi-VN", {
+    timeZone: TZ,
+    day: "2-digit",
+    month: "2-digit"
+  }).format(value);
+
+const toMonthKey = (value: Date | string) => {
+  const date = typeof value === "string" ? new Date(value) : value;
+  const { year, month } = getHoChiMinhParts(date);
+  return formatMonthKey(year, month);
+};
+
+const toMonthLabel = (value: Date | string) => {
+  const date = typeof value === "string" ? new Date(value) : value;
+  const { year, month } = getHoChiMinhParts(date);
+  return `${String(month).padStart(2, "0")}/${year}`;
+};
+
+const buildUserProfileSummary = (row: Record<string, unknown>): UserProfileSummary => ({
+  username: toOptionalString(row.username),
+  display_name: buildDisplayName(row.first_name, row.last_name)
+});
+
+async function loadUserProfilesByIds(
+  supabase: SupabaseClient,
+  userIds: number[]
+): Promise<Map<string, UserProfileSummary>> {
+  const uniqueIds = Array.from(new Set(userIds.filter((userId) => Number.isFinite(userId))));
+  if (!uniqueIds.length) {
+    return new Map();
+  }
+
+  const { data, error } = await supabase.from("users").select("*").in("user_id", uniqueIds);
+  if (error) {
+    throw new Error(error.message || "Không thể tải hồ sơ user.");
+  }
+
+  const map = new Map<string, UserProfileSummary>();
+  for (const row of (data as Array<Record<string, unknown>>) ?? []) {
+    map.set(String(row.user_id), buildUserProfileSummary(row));
+  }
+  return map;
+}
+
+async function loadDashboardFallback(supabase: SupabaseClient): Promise<DashboardSnapshot> {
+  const [{ data: statsData }, ordersRes, depositsRes, withdrawalsRes] = await Promise.all([
+    supabase.rpc("get_stats"),
+    supabase
+      .from("orders")
+      .select("id, user_id, product_id, price, quantity, created_at")
+      .order("created_at", { ascending: false })
+      .limit(6),
+    supabase.from("deposits").select("id", { count: "exact", head: true }).eq("status", "pending"),
+    supabase.from("withdrawals").select("id", { count: "exact", head: true }).eq("status", "pending")
+  ]);
+
+  if (ordersRes.error) {
+    throw new Error(ordersRes.error.message || "Không thể tải đơn hàng gần nhất.");
+  }
+
+  const statsRow = Array.isArray(statsData) ? statsData[0] : statsData;
+  const orderRows = (ordersRes.data as Array<Record<string, unknown>>) || [];
+  const userIds = Array.from(
+    new Set(orderRows.map((row) => toNumber(row.user_id)).filter((value) => value > 0))
+  );
+  const productIds = Array.from(new Set(orderRows.map((row) => row.product_id).filter(Boolean)));
+
+  const [userProfilesById, productsRes] = await Promise.all([
+    loadUserProfilesByIds(supabase, userIds),
+    productIds.length
+      ? supabase.from("products").select("id, name").in("id", productIds)
+      : Promise.resolve({ data: [] as Array<Record<string, unknown>>, error: null })
+  ]);
+
+  const productNamesById = new Map<string, string>();
+  for (const product of productsRes.data ?? []) {
+    productNamesById.set(String(product.id), String(product.name || `#${String(product.id)}`));
+  }
+
+  return {
+    stats: {
+      users: toNumber((statsRow as Record<string, unknown> | null)?.users),
+      orders: toNumber((statsRow as Record<string, unknown> | null)?.orders),
+      revenue: toNumber((statsRow as Record<string, unknown> | null)?.revenue)
+    },
+    pendingDeposits: depositsRes.count ?? 0,
+    pendingWithdrawals: withdrawalsRes.count ?? 0,
+    orders: orderRows.map((row) => ({
+      id: toNumber(row.id),
+      user_id: toNumber(row.user_id),
+      username: userProfilesById.get(String(row.user_id))?.username ?? null,
+      display_name: userProfilesById.get(String(row.user_id))?.display_name ?? null,
+      product_id: toNumber(row.product_id),
+      product_name: productNamesById.get(String(row.product_id)) || `#${String(row.product_id || "-")}`,
+      price: toNumber(row.price),
+      quantity: toNumber(row.quantity),
+      created_at: String(row.created_at || "")
+    }))
+  };
+}
+
+async function loadReportsSnapshot(
+  supabase: SupabaseClient,
+  params: ReportsSnapshotParams
+): Promise<ReportsSnapshot> {
+  const now = new Date();
+  const period = params.period ?? "month";
+
+  if (period === "all_time") {
+    const pendingExpiredBefore = new Date(now.getTime() - 10 * 60 * 1000);
+    const [ordersRes, directOrdersRes] = await Promise.all([
+      supabase
+        .from("orders")
+        .select("product_id, price, quantity, created_at")
+        .lte("created_at", now.toISOString())
+        .order("created_at", { ascending: true }),
+      supabase.from("direct_orders").select("status, created_at").lte("created_at", now.toISOString())
+    ]);
+
+    if (ordersRes.error) {
+      throw new Error(ordersRes.error.message || "Không thể tải dữ liệu báo cáo.");
+    }
+    if (directOrdersRes.error) {
+      throw new Error(directOrdersRes.error.message || "Không thể tải dữ liệu direct order.");
+    }
+
+    const orderRows = (ordersRes.data as OrderMetricRow[]) || [];
+    const directOrderRows = (directOrdersRes.data as DirectOrderMetricRow[]) || [];
+
+    let currentRevenue = 0;
+    let currentOrderCount = 0;
+    let currentQuantity = 0;
+    let confirmed = 0;
+    let failed = 0;
+    let cancelled = 0;
+    let pending = 0;
+    let pendingExpired = 0;
+
+    const trendSeed = new Map<string, DailyTrendRow>();
+    const topByProduct = new Map<
+      string,
+      { productId: string; orders: number; quantity: number; revenue: number }
+    >();
+
+    for (const row of orderRows) {
+      if (!row.created_at) continue;
+      const created = new Date(row.created_at);
+      if (Number.isNaN(created.getTime())) continue;
+
+      const price = toNumber(row.price);
+      const quantity = toNumber(row.quantity);
+      currentRevenue += price;
+      currentOrderCount += 1;
+      currentQuantity += quantity;
+
+      const monthKey = toMonthKey(created);
+      const monthRow = trendSeed.get(monthKey) || {
+        dateKey: monthKey,
+        label: toMonthLabel(created),
+        orders: 0,
+        revenue: 0
+      };
+      monthRow.orders += 1;
+      monthRow.revenue += price;
+      trendSeed.set(monthKey, monthRow);
+
+      const productId = row.product_id != null ? String(row.product_id) : "-";
+      const current = topByProduct.get(productId) || {
+        productId,
+        orders: 0,
+        quantity: 0,
+        revenue: 0
+      };
+      current.orders += 1;
+      current.quantity += quantity;
+      current.revenue += price;
+      topByProduct.set(productId, current);
+    }
+
+    for (const row of directOrderRows) {
+      const status = (row.status || "").toLowerCase();
+      if (status === "confirmed") confirmed += 1;
+      else if (status === "failed") failed += 1;
+      else if (status === "cancelled") cancelled += 1;
+      else if (status === "pending") {
+        pending += 1;
+        if (row.created_at) {
+          const created = new Date(row.created_at);
+          if (!Number.isNaN(created.getTime()) && created < pendingExpiredBefore) {
+            pendingExpired += 1;
+          }
+        }
+      }
+    }
+
+    const total = directOrderRows.length;
+    const processed = confirmed + failed + cancelled;
+    const failedOverall = failed + cancelled;
+    const sortedTop = Array.from(topByProduct.values())
+      .sort((a, b) => {
+        if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+        if (b.quantity !== a.quantity) return b.quantity - a.quantity;
+        return b.orders - a.orders;
+      })
+      .slice(0, 8);
+
+    const topIds = sortedTop.map((row) => row.productId).filter((id) => id !== "-");
+    const productNamesById: Record<string, string> = {};
+    if (topIds.length) {
+      const { data: productRows } = await supabase.from("products").select("id, name").in("id", topIds);
+      for (const product of productRows ?? []) {
+        const id = (product as { id: number | string }).id;
+        const name = (product as { name: string }).name;
+        if (id != null) {
+          productNamesById[String(id)] = name;
+        }
+      }
+    }
+
+    return {
+      period,
+      periodLabel: formatAllTimeLabel(),
+      comparisonLabel: "",
+      hasComparison: false,
+      selectedMonth: null,
+      comparisonMonth: null,
+      revenue: {
+        current: currentRevenue,
+        previous: 0,
+        deltaAmount: 0,
+        deltaPercent: 0
+      },
+      orderOps: {
+        orderCount: currentOrderCount,
+        averageOrderValue: currentOrderCount > 0 ? currentRevenue / currentOrderCount : 0,
+        averageQuantity: currentOrderCount > 0 ? currentQuantity / currentOrderCount : 0
+      },
+      directOrderStats: {
+        total,
+        confirmed,
+        failed,
+        cancelled,
+        pending,
+        pendingExpired,
+        confirmedRate: processed > 0 ? (confirmed / processed) * 100 : 0,
+        failedRate: processed > 0 ? (failedOverall / processed) * 100 : 0
+      },
+      dailyTrend: Array.from(trendSeed.values()).sort((a, b) => a.dateKey.localeCompare(b.dateKey)),
+      topProducts: sortedTop.map((row) => ({
+        productId: row.productId,
+        productName: productNamesById[row.productId] || `#${row.productId}`,
+        orders: row.orders,
+        quantity: row.quantity,
+        revenue: row.revenue
+      }))
+    };
+  }
+
+  const range = getReportsPeriodRange(period, now, params.month, params.compareMonth);
+  const pendingExpiredBefore = new Date(now.getTime() - 10 * 60 * 1000);
+  const currentWindowValid = range.current.end.getTime() >= range.current.start.getTime();
+  const comparisonWindowValid = range.comparison.end.getTime() >= range.comparison.start.getTime();
+
+  let orderRows: OrderMetricRow[] = [];
+  if (currentWindowValid || comparisonWindowValid) {
+    const orderRangeStart =
+      !comparisonWindowValid || range.current.start.getTime() <= range.comparison.start.getTime()
+        ? range.current.start
+        : range.comparison.start;
+    const orderRangeEnd =
+      !comparisonWindowValid || range.current.end.getTime() >= range.comparison.end.getTime()
+        ? range.current.end
+        : range.comparison.end;
+
+    const { data, error } = await supabase
+      .from("orders")
+      .select("product_id, price, quantity, created_at")
+      .gte("created_at", orderRangeStart.toISOString())
+      .lte("created_at", orderRangeEnd.toISOString())
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      throw new Error(error.message || "Không thể tải dữ liệu báo cáo.");
+    }
+
+    orderRows = (data as OrderMetricRow[]) || [];
+  }
+
+  const { data: directOrdersData, error: directOrdersError } = await supabase
+    .from("direct_orders")
+    .select("status, created_at")
+    .gte("created_at", range.current.start.toISOString())
+    .lte("created_at", range.current.end.toISOString());
+
+  if (directOrdersError) {
+    throw new Error(directOrdersError.message || "Không thể tải dữ liệu direct order.");
+  }
+
+  const directOrderRows = (directOrdersData as DirectOrderMetricRow[]) || [];
+
+  const isInCurrentWindow = (value: Date) =>
+    currentWindowValid &&
+    value.getTime() >= range.current.start.getTime() &&
+    value.getTime() <= range.current.end.getTime();
+
+  const isInComparisonWindow = (value: Date) =>
+    comparisonWindowValid &&
+    value.getTime() >= range.comparison.start.getTime() &&
+    value.getTime() <= range.comparison.end.getTime();
+
+  const trendSeed = new Map<string, DailyTrendRow>();
+  if (currentWindowValid) {
+    for (
+      let cursor = new Date(range.current.start);
+      cursor <= range.current.end;
+      cursor = addHoChiMinhDays(cursor, 1)
+    ) {
+      const key = toDateKey(cursor);
+      trendSeed.set(key, {
+        dateKey: key,
+        label: toShortDateLabel(cursor),
+        orders: 0,
+        revenue: 0
+      });
+    }
+  }
+
+  let currentRevenue = 0;
+  let previousRevenue = 0;
+  let currentOrderCount = 0;
+  let currentQuantity = 0;
+
+  const topByProduct = new Map<
+    string,
+    { productId: string; orders: number; quantity: number; revenue: number }
+  >();
+
+  for (const row of orderRows) {
+    if (!row.created_at) continue;
+    const created = new Date(row.created_at);
+    if (Number.isNaN(created.getTime())) continue;
+
+    const price = toNumber(row.price);
+    const quantity = toNumber(row.quantity);
+
+    if (isInCurrentWindow(created)) {
+      currentRevenue += price;
+      currentOrderCount += 1;
+      currentQuantity += quantity;
+
+      const trendKey = toDateKey(created);
+      const trendRow = trendSeed.get(trendKey);
+      if (trendRow) {
+        trendRow.orders += 1;
+        trendRow.revenue += price;
+      }
+
+      const productId = row.product_id != null ? String(row.product_id) : "-";
+      const current = topByProduct.get(productId) || {
+        productId,
+        orders: 0,
+        quantity: 0,
+        revenue: 0
+      };
+      current.orders += 1;
+      current.quantity += quantity;
+      current.revenue += price;
+      topByProduct.set(productId, current);
+    }
+
+    if (isInComparisonWindow(created)) {
+      previousRevenue += price;
+    }
+  }
+
+  let confirmed = 0;
+  let failed = 0;
+  let cancelled = 0;
+  let pending = 0;
+  let pendingExpired = 0;
+
+  for (const row of directOrderRows) {
+    const status = (row.status || "").toLowerCase();
+    if (status === "confirmed") confirmed += 1;
+    else if (status === "failed") failed += 1;
+    else if (status === "cancelled") cancelled += 1;
+    else if (status === "pending") {
+      pending += 1;
+      if (row.created_at) {
+        const created = new Date(row.created_at);
+        if (!Number.isNaN(created.getTime()) && created < pendingExpiredBefore) {
+          pendingExpired += 1;
+        }
+      }
+    }
+  }
+
+  const total = directOrderRows.length;
+  const processed = confirmed + failed + cancelled;
+  const failedOverall = failed + cancelled;
+
+  const sortedTop = Array.from(topByProduct.values())
+    .sort((a, b) => {
+      if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+      if (b.quantity !== a.quantity) return b.quantity - a.quantity;
+      return b.orders - a.orders;
+    })
+    .slice(0, 8);
+
+  const topIds = sortedTop.map((row) => row.productId).filter((id) => id !== "-");
+  const productNamesById: Record<string, string> = {};
+  if (topIds.length) {
+    const { data: productRows } = await supabase.from("products").select("id, name").in("id", topIds);
+    for (const product of productRows ?? []) {
+      const id = (product as { id: number | string }).id;
+      const name = (product as { name: string }).name;
+      if (id != null) {
+        productNamesById[String(id)] = name;
+      }
+    }
+  }
+
+  return {
+    period,
+    periodLabel: range.periodLabel,
+    comparisonLabel: range.comparisonLabel,
+    hasComparison: true,
+    selectedMonth: range.selectedMonth,
+    comparisonMonth: range.comparisonMonth,
+    revenue: {
+      current: currentRevenue,
+      previous: previousRevenue,
+      deltaAmount: currentRevenue - previousRevenue,
+      deltaPercent: calcDeltaPercent(currentRevenue, previousRevenue)
+    },
+    orderOps: {
+      orderCount: currentOrderCount,
+      averageOrderValue: currentOrderCount > 0 ? currentRevenue / currentOrderCount : 0,
+      averageQuantity: currentOrderCount > 0 ? currentQuantity / currentOrderCount : 0
+    },
+    directOrderStats: {
+      total,
+      confirmed,
+      failed,
+      cancelled,
+      pending,
+      pendingExpired,
+      confirmedRate: processed > 0 ? (confirmed / processed) * 100 : 0,
+      failedRate: processed > 0 ? (failedOverall / processed) * 100 : 0
+    },
+    dailyTrend: Array.from(trendSeed.values()),
+    topProducts: sortedTop.map((row) => ({
+      productId: row.productId,
+      productName: productNamesById[row.productId] || `#${row.productId}`,
+      orders: row.orders,
+      quantity: row.quantity,
+      revenue: row.revenue
+    }))
+  };
+}
+
+async function loadAllUsers(supabase: SupabaseClient): Promise<BaseUserRow[]> {
+  const pageSize = 1000;
+  const rows: BaseUserRow[] = [];
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from("users")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .order("user_id", { ascending: false })
+      .range(from, from + pageSize - 1);
+
+    if (error) {
+      throw new Error(error.message || "Không thể tải danh sách user.");
+    }
+
+    const chunk = (data as BaseUserRow[]) || [];
+    if (!chunk.length) break;
+    rows.push(...chunk);
+    if (chunk.length < pageSize) break;
+    from += pageSize;
+  }
+
+  return rows;
+}
+
+type UsersSnapshotParams = {
+  page?: number;
+  pageSize?: number;
+  search?: string;
+};
+
+export async function getDashboardSnapshot(supabase: SupabaseClient): Promise<DashboardSnapshot> {
+  let snapshot: DashboardSnapshot;
+  const { data, error } = await supabase.rpc("admin_bot_dashboard_snapshot", { p_recent_limit: 6 });
+  if (error) {
+    if (!isMissingRpcError(error.message || "")) {
+      throw new Error(error.message || "Không thể tải dashboard snapshot.");
+    }
+    snapshot = await loadDashboardFallback(supabase);
+  } else {
+    snapshot = normalizeDashboardSnapshot(normalizeRpcData(data));
+  }
+
+  const userProfilesById = await loadUserProfilesByIds(
+    supabase,
+    snapshot.orders.map((order) => order.user_id)
+  );
+
+  return {
+    ...snapshot,
+    orders: snapshot.orders.map((order) => ({
+      ...order,
+      username: userProfilesById.get(String(order.user_id))?.username ?? order.username ?? null,
+      display_name: userProfilesById.get(String(order.user_id))?.display_name ?? order.display_name ?? null
+    }))
+  };
+}
+
+export async function getReportsSnapshot(
+  supabase: SupabaseClient,
+  params: ReportsSnapshotParams = {}
+): Promise<ReportsSnapshot> {
+  return loadReportsSnapshot(supabase, params);
+}
+
+export async function getUsersSnapshot(
+  supabase: SupabaseClient,
+  params: UsersSnapshotParams = {}
+): Promise<UsersSnapshot> {
+  const safePageSize = Math.max(1, Math.min(Math.trunc(params.pageSize || 50) || 50, 200));
+  const safePage = Math.max(1, Math.trunc(params.page || 1) || 1);
+  const keyword = (params.search || "").trim().toLowerCase();
+  const keywordNoAt = keyword.replace(/^@/, "");
+
+  const allUsers = await loadAllUsers(supabase);
+  const filteredUsers = !keyword
+    ? allUsers
+    : allUsers.filter((row) => {
+        const userIdText = String(row.user_id ?? "");
+        const username = (toOptionalString(row.username) || "").toLowerCase();
+        const usernameNoAt = username.replace(/^@/, "");
+        const displayName = (buildDisplayName(row.first_name, row.last_name) || "").toLowerCase();
+
+        return (
+          userIdText.includes(keywordNoAt) ||
+          username.includes(keyword) ||
+          usernameNoAt.includes(keywordNoAt) ||
+          displayName.includes(keyword)
+        );
+      });
+
+  const totalCount = filteredUsers.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / safePageSize));
+  const page = Math.min(safePage, totalPages);
+  const from = (page - 1) * safePageSize;
+  const pageUsers = filteredUsers.slice(from, from + safePageSize);
+
+  if (!pageUsers.length) {
+    return {
+      users: [],
+      page,
+      pageSize: safePageSize,
+      totalCount,
+      totalPages
+    };
+  }
+
+  const userIds = pageUsers.map((user) => toNumber(user.user_id)).filter((value) => value > 0);
+  const { data: orderData, error: orderError } = await supabase
+    .from("orders")
+    .select("user_id, price")
+    .in("user_id", userIds);
+
+  if (orderError) {
+    throw new Error(orderError.message || "Không thể tải thống kê đơn hàng của user.");
+  }
+
+  const statsByUser = new Map<number, { orderCount: number; totalPaid: number }>();
+  ((orderData as Array<{ user_id: number; price: number | null }>) || []).forEach((order) => {
+    const current = statsByUser.get(order.user_id) || { orderCount: 0, totalPaid: 0 };
+    current.orderCount += 1;
+    current.totalPaid += Number(order.price || 0);
+    statsByUser.set(order.user_id, current);
+  });
+
+  return {
+    users: pageUsers.map((user) => {
+      const userId = toNumber(user.user_id);
+      const stats = statsByUser.get(userId);
+      return {
+        user_id: userId,
+        username: toOptionalString(user.username),
+        display_name: buildDisplayName(user.first_name, user.last_name),
+        balance: toNumber(user.balance),
+        balance_usdt: toNumber(user.balance_usdt),
+        language: toOptionalString(user.language),
+        created_at: toOptionalString(user.created_at),
+        order_count: stats?.orderCount ?? 0,
+        total_paid: stats?.totalPaid ?? 0
+      };
+    }),
+    page,
+    pageSize: safePageSize,
+    totalCount,
+    totalPages
+  };
+}

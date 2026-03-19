@@ -17,6 +17,13 @@ type MiddleBannerItem = {
   link: string;
 };
 
+type FaqItem = {
+  id: string;
+  question: string;
+  answer: string;
+  enabled: boolean;
+};
+
 const DEFAULT_APP_BANNERS: Omit<AppBannerItem, "id">[] = [
   { image_url: "", title: "Microsoft Office", subtitle: "Bản quyền", link: "" },
   { image_url: "", title: "Khám phá thế giới AI", subtitle: "Siêu tối ưu", link: "" },
@@ -35,6 +42,11 @@ const WEBSITE_SETTINGS_KEYS = [
   "website_shop_page_size",
   "website_payment_mode",
   "website_show_app_banners",
+  "website_show_stats_section",
+  "website_show_stats_feedback",
+  "website_show_stats_sold",
+  "website_show_stats_customers",
+  "website_faq_items",
   "website_banner_middle_url",
   "website_banner_middles",
   "website_banner_ads_left_url",
@@ -128,10 +140,56 @@ const sanitizeMiddleBannersForSave = (rows: MiddleBannerItem[]) =>
     }))
     .filter((row) => row.image_url || row.link);
 
+const parseFaqItems = (raw: string): FaqItem[] => {
+  const rawJson = String(raw || "").trim();
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((row: any) => ({
+            id: makeBannerId(),
+            question: String(row?.question || ""),
+            answer: String(row?.answer || ""),
+            enabled: row?.enabled !== false
+          }))
+          .filter((row) => row.question.trim() || row.answer.trim());
+      }
+    } catch {
+      // ignore invalid JSON and fallback
+    }
+  }
+
+  return [
+    {
+      id: makeBannerId(),
+      question: "Shop này chạy theo logic nào?",
+      answer: "Đồng bộ với Bot Telegram và Dashboard hiện tại: giá, tồn kho, direct order, SePay checker.",
+      enabled: true
+    },
+    {
+      id: makeBannerId(),
+      question: "Có hỗ trợ sau thanh toán không?",
+      answer: "Đơn confirmed được xử lý theo tồn kho. Bạn có thể tra mã thanh toán ở mục Status hoặc liên hệ hỗ trợ.",
+      enabled: true
+    }
+  ];
+};
+
+const sanitizeFaqItemsForSave = (rows: FaqItem[]) =>
+  rows
+    .map((row) => ({
+      question: row.question.trim(),
+      answer: row.answer.trim(),
+      enabled: row.enabled
+    }))
+    .filter((row) => row.question && row.answer);
+
 export default function WebsiteSettingsPage() {
   const [values, setValues] = useState<Record<string, string>>({});
   const [appBanners, setAppBanners] = useState<AppBannerItem[]>([]);
   const [middleBanners, setMiddleBanners] = useState<MiddleBannerItem[]>([]);
+  const [faqItems, setFaqItems] = useState<FaqItem[]>([]);
   const [message, setMessage] = useState<string | null>(null);
 
   const load = async () => {
@@ -152,6 +210,7 @@ export default function WebsiteSettingsPage() {
     setValues(map);
     setAppBanners(parseBannerApps(map.website_banner_apps || "", map));
     setMiddleBanners(parseMiddleBanners(map.website_banner_middles || "", map));
+    setFaqItems(parseFaqItems(map.website_faq_items || ""));
   };
 
   useEffect(() => {
@@ -186,6 +245,18 @@ export default function WebsiteSettingsPage() {
     setMiddleBanners((prev) => prev.filter((row) => row.id !== id));
   };
 
+  const updateFaqItem = (id: string, key: keyof Omit<FaqItem, "id">, value: string | boolean) => {
+    setFaqItems((prev) => prev.map((row) => (row.id === id ? { ...row, [key]: value } : row)));
+  };
+
+  const addFaqItem = () => {
+    setFaqItems((prev) => [...prev, { id: makeBannerId(), question: "", answer: "", enabled: true }]);
+  };
+
+  const removeFaqItem = (id: string) => {
+    setFaqItems((prev) => prev.filter((row) => row.id !== id));
+  };
+
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     setMessage(null);
@@ -194,6 +265,8 @@ export default function WebsiteSettingsPage() {
     const appBannerJson = JSON.stringify(normalizedAppBanners);
     const normalizedMiddleBanners = sanitizeMiddleBannersForSave(middleBanners);
     const middleBannerJson = JSON.stringify(normalizedMiddleBanners);
+    const normalizedFaqItems = sanitizeFaqItemsForSave(faqItems);
+    const faqItemsJson = JSON.stringify(normalizedFaqItems);
 
     const payload = WEBSITE_SETTINGS_KEYS.map((key) => {
       if (key === "website_shop_page_size") {
@@ -208,6 +281,10 @@ export default function WebsiteSettingsPage() {
 
       if (key === "website_banner_middles") {
         return { key, value: middleBannerJson };
+      }
+
+      if (key === "website_faq_items") {
+        return { key, value: faqItemsJson };
       }
 
       if (key === "website_banner_middle_url") {
@@ -444,6 +521,92 @@ export default function WebsiteSettingsPage() {
             </div>
             <button type="button" className="button secondary" style={{ marginTop: 10 }} onClick={addAppBanner}>
               Thêm Banner Ứng dụng
+            </button>
+          </div>
+
+          <div className="form-section">
+            <div className="section-title">Thống kê Hero</div>
+            <p className="muted" style={{ marginBottom: 10 }}>
+              Có thể ẩn cả khối thống kê hoặc ẩn từng box nhỏ.
+            </p>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={values.website_show_stats_section !== "false"}
+                onChange={(e) => updateField("website_show_stats_section", e.target.checked ? "true" : "false")}
+              />
+              <span>Hiển thị toàn bộ khối Stats</span>
+            </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={values.website_show_stats_feedback !== "false"}
+                onChange={(e) => updateField("website_show_stats_feedback", e.target.checked ? "true" : "false")}
+              />
+              <span>Hiển thị box Feedback Rating</span>
+            </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={values.website_show_stats_sold !== "false"}
+                onChange={(e) => updateField("website_show_stats_sold", e.target.checked ? "true" : "false")}
+              />
+              <span>Hiển thị box Products Sold</span>
+            </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={values.website_show_stats_customers !== "false"}
+                onChange={(e) => updateField("website_show_stats_customers", e.target.checked ? "true" : "false")}
+              />
+              <span>Hiển thị box Total Customers</span>
+            </label>
+          </div>
+
+          <div className="form-section">
+            <div className="section-title">FAQ (CRUD)</div>
+            <p className="muted" style={{ marginBottom: 10 }}>
+              Thêm / sửa / xóa FAQ hiển thị ở Website.
+            </p>
+            <div className="grid" style={{ gap: 10 }}>
+              {faqItems.map((item, index) => (
+                <div key={item.id} className="card" style={{ padding: 12, boxShadow: "none" }}>
+                  <div className="section-title" style={{ fontSize: 14, marginBottom: 8 }}>
+                    FAQ #{index + 1}
+                  </div>
+                  <label className="toggle" style={{ marginBottom: 8 }}>
+                    <input
+                      type="checkbox"
+                      checked={item.enabled}
+                      onChange={(e) => updateFaqItem(item.id, "enabled", e.target.checked)}
+                    />
+                    <span>Hiển thị mục FAQ này</span>
+                  </label>
+                  <input
+                    className="input"
+                    placeholder="Câu hỏi"
+                    value={item.question}
+                    onChange={(e) => updateFaqItem(item.id, "question", e.target.value)}
+                  />
+                  <textarea
+                    className="textarea"
+                    placeholder="Câu trả lời"
+                    value={item.answer}
+                    onChange={(e) => updateFaqItem(item.id, "answer", e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="button secondary"
+                    style={{ marginTop: 10 }}
+                    onClick={() => removeFaqItem(item.id)}
+                  >
+                    Xóa FAQ
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button type="button" className="button secondary" style={{ marginTop: 10 }} onClick={addFaqItem}>
+              Thêm FAQ
             </button>
           </div>
 

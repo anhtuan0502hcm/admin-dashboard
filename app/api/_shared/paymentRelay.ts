@@ -38,8 +38,7 @@ export const sendPaymentRelayNotification = async (
     }
 
     const text = messageLines
-      .map((line) => String(line || "").trim())
-      .filter(Boolean)
+      .map((line) => String(line ?? "").trimEnd())
       .join("\n")
       .slice(0, TELEGRAM_MAX_MESSAGE_LENGTH);
 

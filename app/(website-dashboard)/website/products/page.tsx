@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ChangeEvent } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
 interface PriceTier {
@@ -19,13 +19,17 @@ interface Product {
   name: string;
   website_name: string | null;
   website_price: number | null;
+  website_sort_position: number | null;
   website_price_tiers: PriceTier[] | null;
   website_promo_buy_quantity: number | null;
   website_promo_bonus_quantity: number | null;
+  website_banner_url: string | null;
   description: string | null;
-  format_data: string | null;
-  is_hidden: boolean;
-  is_deleted: boolean;
+  website_format_data: string | null;
+  website_enabled: boolean;
+  website_deleted: boolean;
+  legacy_is_hidden: boolean;
+  legacy_is_deleted: boolean;
 }
 
 interface FormatTemplate {
@@ -71,6 +75,33 @@ const formatTierSummary = (tiers: PriceTier[] | null | undefined) => {
     .join(" | ");
 };
 
+const PRODUCT_BANNER_BUCKET = "admin-uploads";
+const STORAGE_URI_PREFIX = "storage://";
+
+const sanitizeFileSegment = (value: string) => {
+  const normalized = String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || "image";
+};
+
+const makeStorageUri = (bucket: string, objectPath: string) => `${STORAGE_URI_PREFIX}${bucket}/${objectPath}`;
+
+const getWebsitePositionRank = (value: number | null | undefined) =>
+  Number.isFinite(value) ? Number(value) : Number.POSITIVE_INFINITY;
+
+const sortProductsByWebsitePosition = (rows: Product[]) =>
+  rows
+    .slice()
+    .sort((a, b) => {
+      const rankA = getWebsitePositionRank(a.website_sort_position);
+      const rankB = getWebsitePositionRank(b.website_sort_position);
+      if (rankA !== rankB) return rankA - rankB;
+      return a.id - b.id;
+    });
+
 export default function ProductsPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [formatTemplates, setFormatTemplates] = useState<FormatTemplate[]>([]);
@@ -78,7 +109,10 @@ export default function ProductsPage() {
   const [productError, setProductError] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
+  const [position, setPosition] = useState("");
   const [description, setDescription] = useState("");
+  const [bannerUrl, setBannerUrl] = useState("");
+  const [bannerUploading, setBannerUploading] = useState(false);
   const [formatData, setFormatData] = useState("");
   const [priceTierRows, setPriceTierRows] = useState<PriceTierRow[]>([createTierRow()]);
   const [promoBuyQuantity, setPromoBuyQuantity] = useState("");
@@ -86,12 +120,16 @@ export default function ProductsPage() {
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [editName, setEditName] = useState("");
   const [editPrice, setEditPrice] = useState("");
+  const [editPosition, setEditPosition] = useState("");
   const [editDescription, setEditDescription] = useState("");
+  const [editBannerUrl, setEditBannerUrl] = useState("");
+  const [editBannerUploading, setEditBannerUploading] = useState(false);
   const [editFormatData, setEditFormatData] = useState("");
   const [editPriceTierRows, setEditPriceTierRows] = useState<PriceTierRow[]>([createTierRow()]);
   const [editPromoBuyQuantity, setEditPromoBuyQuantity] = useState("");
   const [editPromoBonusQuantity, setEditPromoBonusQuantity] = useState("");
   const [deleteProduct, setDeleteProduct] = useState<Product | null>(null);
+  const [productChannelMode, setProductChannelMode] = useState<"website" | "legacy">("website");
   const [templateName, setTemplateName] = useState("");
   const [templatePattern, setTemplatePattern] = useState("");
   const [templateError, setTemplateError] = useState<string | null>(null);
@@ -103,51 +141,63 @@ export default function ProductsPage() {
   const load = async () => {
     const { data, error } = await supabase
       .from("products")
-      .select("id, name, website_name, website_price, website_price_tiers, website_promo_buy_quantity, website_promo_bonus_quantity, website_description:website_description, format_data, is_hidden, is_deleted")
+      .select(
+        "id, name, website_name, website_price, website_sort_position, website_price_tiers, website_promo_buy_quantity, website_promo_bonus_quantity, website_banner_url, website_description, website_format_data, website_enabled, website_deleted"
+      )
       .order("id");
     if (error) {
       const { data: fallbackData, error: fallbackError } = await supabase
         .from("products")
-        .select("id, name, price, price_usdt, price_tiers, promo_buy_quantity, promo_bonus_quantity, description, format_data")
+        .select("id, name, price, price_usdt, price_tiers, promo_buy_quantity, promo_bonus_quantity, description, format_data, is_hidden, is_deleted")
         .order("id");
       if (fallbackError) {
         setProductError(fallbackError.message);
         return;
       }
-      setProductError("Thiếu cột website_* trong products. Hãy chạy SQL migration mới cho Website Dashboard.");
-      setProducts(
-        ((fallbackData as any[]) || []).map((row) => ({
-          id: Number(row.id),
-          name: String(row.name || ""),
-          website_name: String(row.name || ""),
-          website_price: Number(row.price || 0),
-          website_price_tiers: (row.price_tiers as PriceTier[] | null) ?? null,
-          website_promo_buy_quantity: Number(row.promo_buy_quantity || 0),
-          website_promo_bonus_quantity: Number(row.promo_bonus_quantity || 0),
-          description: row.description ?? null,
-          format_data: row.format_data ?? null,
-          is_hidden: false,
-          is_deleted: false
-        }))
-      );
+      setProductError("Thiếu cột website_* trong products. Hệ thống đang dùng chế độ tương thích bot (`is_hidden/is_deleted`). Hãy chạy SQL migration mới.");
+      setProductChannelMode("legacy");
+      const fallbackRows = ((fallbackData as any[]) || []).map((row) => ({
+        id: Number(row.id),
+        name: String(row.name || ""),
+        website_name: String(row.name || ""),
+        website_price: Number(row.price || 0),
+        website_sort_position: null,
+        website_price_tiers: (row.price_tiers as PriceTier[] | null) ?? null,
+        website_promo_buy_quantity: Number(row.promo_buy_quantity || 0),
+        website_promo_bonus_quantity: Number(row.promo_bonus_quantity || 0),
+        website_banner_url: null,
+        description: row.description ?? null,
+        website_format_data: row.format_data ?? null,
+        website_enabled: !Boolean(row.is_hidden),
+        website_deleted: Boolean(row.is_deleted),
+        legacy_is_hidden: Boolean(row.is_hidden),
+        legacy_is_deleted: Boolean(row.is_deleted)
+      }));
+      setProducts(sortProductsByWebsitePosition(fallbackRows));
       return;
     }
     setProductError(null);
-    setProducts(
-      ((data as any[]) || []).map((row) => ({
-        id: Number(row.id),
-        name: String(row.name || ""),
-        website_name: row.website_name ?? null,
-        website_price: Number(row.website_price || 0),
-        website_price_tiers: (row.website_price_tiers as PriceTier[] | null) ?? null,
-        website_promo_buy_quantity: Number(row.website_promo_buy_quantity || 0),
-        website_promo_bonus_quantity: Number(row.website_promo_bonus_quantity || 0),
-        description: row.website_description ?? null,
-        format_data: row.format_data ?? null,
-        is_hidden: Boolean(row.is_hidden),
-        is_deleted: Boolean(row.is_deleted)
-      }))
-    );
+    setProductChannelMode("website");
+    const mappedRows = ((data as any[]) || []).map((row) => ({
+      id: Number(row.id),
+      name: String(row.name || ""),
+      website_name: row.website_name ?? null,
+      website_price: Number(row.website_price || 0),
+      website_sort_position: Number.isFinite(Number(row.website_sort_position))
+        ? Number(row.website_sort_position)
+        : null,
+      website_price_tiers: (row.website_price_tiers as PriceTier[] | null) ?? null,
+      website_promo_buy_quantity: Number(row.website_promo_buy_quantity || 0),
+      website_promo_bonus_quantity: Number(row.website_promo_bonus_quantity || 0),
+      website_banner_url: row.website_banner_url ?? null,
+      description: row.website_description ?? null,
+      website_format_data: row.website_format_data ?? null,
+      website_enabled: row.website_enabled !== false,
+      website_deleted: row.website_deleted === true,
+      legacy_is_hidden: false,
+      legacy_is_deleted: false
+    }));
+    setProducts(sortProductsByWebsitePosition(mappedRows));
   };
 
   const loadFormats = async () => {
@@ -210,13 +260,61 @@ export default function ProductsPage() {
     setEditPriceTierRows((prev) => prev.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
   };
 
+  const uploadProductBanner = async (file: File, productId?: number) => {
+    const mimeType = String(file.type || "").toLowerCase();
+    if (!mimeType.startsWith("image/")) {
+      throw new Error("Chỉ hỗ trợ upload file ảnh (jpg/png/webp...).");
+    }
+
+    const fileExtension = sanitizeFileSegment(file.name.split(".").pop() || "png");
+    const fileBase = sanitizeFileSegment(file.name.replace(/\.[^.]+$/, ""));
+    const objectPath = [
+      "website-products",
+      String(productId || "new"),
+      `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${fileBase}.${fileExtension}`
+    ].join("/");
+
+    const { error } = await supabase.storage.from(PRODUCT_BANNER_BUCKET).upload(objectPath, file, {
+      upsert: false,
+      contentType: file.type || "image/png",
+      cacheControl: "3600"
+    });
+    if (error) {
+      throw new Error(error.message);
+    }
+    return makeStorageUri(PRODUCT_BANNER_BUCKET, objectPath);
+  };
+
+  const handleBannerUpload = async (event: ChangeEvent<HTMLInputElement>, mode: "add" | "edit") => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    try {
+      if (mode === "add") setBannerUploading(true);
+      if (mode === "edit") setEditBannerUploading(true);
+
+      const uploadedUri = await uploadProductBanner(file, mode === "edit" ? editingProduct?.id : undefined);
+      if (mode === "add") setBannerUrl(uploadedUri);
+      if (mode === "edit") setEditBannerUrl(uploadedUri);
+      setProductError(null);
+    } catch (error: any) {
+      setProductError(error?.message || "Upload ảnh thất bại.");
+    } finally {
+      if (mode === "add") setBannerUploading(false);
+      if (mode === "edit") setEditBannerUploading(false);
+    }
+  };
+
   const handleAdd = async (event: React.FormEvent) => {
     event.preventDefault();
     const tiers = normalizeTierRows(priceTierRows);
     const buyQty = Number(promoBuyQuantity || "0");
     const bonusQty = Number(promoBonusQuantity || "0");
     const parsedPrice = Number.parseInt(price || "0", 10);
+    const parsedPosition = Number.parseInt(position || "", 10);
     const websitePrice = Number.isFinite(parsedPrice) ? Math.max(0, parsedPrice) : 0;
+    const websiteSortPosition = Number.isFinite(parsedPosition) ? Math.trunc(parsedPosition) : null;
     const hasPromo = buyQty > 0 || bonusQty > 0;
     if (hasPromo && (!Number.isFinite(buyQty) || !Number.isFinite(bonusQty) || buyQty < 1 || bonusQty < 1)) {
       setProductError("Khuyến mãi cần đủ 2 giá trị hợp lệ: mua X và tặng Y đều phải lớn hơn 0.");
@@ -229,39 +327,31 @@ export default function ProductsPage() {
       price_usdt: 0,
       website_name: name || null,
       website_price: websitePrice,
+      website_sort_position: websiteSortPosition,
       website_price_tiers: tiers.length ? tiers : null,
       website_promo_buy_quantity: hasPromo ? Math.trunc(buyQty) : 0,
       website_promo_bonus_quantity: hasPromo ? Math.trunc(bonusQty) : 0,
+      website_banner_url: bannerUrl.trim() || null,
       website_description: description || null,
-      format_data: formatData || null
+      website_format_data: formatData || null,
+      website_enabled: true,
+      website_deleted: false
     };
-
-    const fallbackPayload = {
-      name,
-      price: websitePrice,
-      price_usdt: 0,
-      format_data: formatData || null,
-      price_tiers: tiers.length ? tiers : null,
-      promo_buy_quantity: hasPromo ? Math.trunc(buyQty) : 0,
-      promo_bonus_quantity: hasPromo ? Math.trunc(bonusQty) : 0
-    };
-
-    let { error } = await supabase.from("products").insert(websitePayload);
-    if (error && error.message.includes("website_")) {
-      const fallback = await supabase.from("products").insert({
-        ...fallbackPayload,
-        description: description || null
-      });
-      error = fallback.error;
-    }
+    const { error } = await supabase.from("products").insert(websitePayload);
     if (error) {
-      setProductError(error.message);
+      setProductError(
+        error.message.includes("website_")
+          ? "Thiếu cột website_* trong products. Hãy chạy SQL migration mới cho Website Dashboard."
+          : error.message
+      );
       return;
     }
     setProductError(null);
     setName("");
     setPrice("");
+    setPosition("");
     setDescription("");
+    setBannerUrl("");
     setFormatData("");
     setPriceTierRows([createTierRow()]);
     setPromoBuyQuantity("");
@@ -271,18 +361,22 @@ export default function ProductsPage() {
 
   const handleDeleteConfirm = async () => {
     if (!deleteProduct) return;
-    const { error } = await supabase
-      .from("products")
-      .update({
-        is_deleted: true,
-        is_hidden: true,
-        deleted_at: new Date().toISOString()
-      })
-      .eq("id", deleteProduct.id);
+    const updatePayload =
+      productChannelMode === "website"
+        ? {
+            website_deleted: true,
+            website_enabled: false
+          }
+        : {
+            is_deleted: true,
+            is_hidden: true,
+            deleted_at: new Date().toISOString()
+          };
+    const { error } = await supabase.from("products").update(updatePayload).eq("id", deleteProduct.id);
     if (error) {
       setProductError(
-        error.message.includes("is_deleted") || error.message.includes("deleted_at")
-          ? "Thiếu cột soft-delete trong products. Hãy chạy SQL migration mới."
+        error.message.includes("website_") || error.message.includes("is_deleted")
+          ? "Thiếu cột website_deleted/website_enabled trong products. Hãy chạy SQL migration mới."
           : error.message
       );
       return;
@@ -292,15 +386,18 @@ export default function ProductsPage() {
   };
 
   const handleToggleHidden = async (product: Product) => {
-    if (product.is_deleted) return;
-    const { error } = await supabase
-      .from("products")
-      .update({ is_hidden: !product.is_hidden })
-      .eq("id", product.id);
+    if (product.website_deleted) return;
+    const nextHidden =
+      productChannelMode === "website" ? !product.website_enabled : !product.legacy_is_hidden;
+    const updatePayload =
+      productChannelMode === "website"
+        ? { website_enabled: !product.website_enabled }
+        : { is_hidden: nextHidden };
+    const { error } = await supabase.from("products").update(updatePayload).eq("id", product.id);
     if (error) {
       setProductError(
-        error.message.includes("is_hidden")
-          ? "Thiếu cột is_hidden trong products. Hãy chạy SQL migration soft-delete mới."
+        error.message.includes("website_enabled") || error.message.includes("is_hidden")
+          ? "Thiếu cột website_enabled trong products. Hãy chạy SQL migration mới."
           : error.message
       );
       return;
@@ -309,18 +406,22 @@ export default function ProductsPage() {
   };
 
   const handleRestore = async (product: Product) => {
-    const { error } = await supabase
-      .from("products")
-      .update({
-        is_deleted: false,
-        is_hidden: false,
-        deleted_at: null
-      })
-      .eq("id", product.id);
+    const updatePayload =
+      productChannelMode === "website"
+        ? {
+            website_deleted: false,
+            website_enabled: true
+          }
+        : {
+            is_deleted: false,
+            is_hidden: false,
+            deleted_at: null
+          };
+    const { error } = await supabase.from("products").update(updatePayload).eq("id", product.id);
     if (error) {
       setProductError(
-        error.message.includes("is_deleted") || error.message.includes("deleted_at")
-          ? "Thiếu cột soft-delete trong products. Hãy chạy SQL migration mới."
+        error.message.includes("website_") || error.message.includes("is_deleted")
+          ? "Thiếu cột website_deleted/website_enabled trong products. Hãy chạy SQL migration mới."
           : error.message
       );
       return;
@@ -332,8 +433,12 @@ export default function ProductsPage() {
     setEditingProduct(product);
     setEditName(product.website_name || product.name);
     setEditPrice((product.website_price ?? 0).toString());
+    setEditPosition(
+      Number.isFinite(product.website_sort_position) ? String(product.website_sort_position) : ""
+    );
     setEditDescription(product.description ?? "");
-    setEditFormatData(product.format_data ?? "");
+    setEditBannerUrl(product.website_banner_url ?? "");
+    setEditFormatData(product.website_format_data ?? "");
     setEditPriceTierRows(parseTierRows(product.website_price_tiers));
     setEditPromoBuyQuantity(product.website_promo_buy_quantity ? product.website_promo_buy_quantity.toString() : "");
     setEditPromoBonusQuantity(product.website_promo_bonus_quantity ? product.website_promo_bonus_quantity.toString() : "");
@@ -343,7 +448,10 @@ export default function ProductsPage() {
     setEditingProduct(null);
     setEditName("");
     setEditPrice("");
+    setEditPosition("");
     setEditDescription("");
+    setEditBannerUrl("");
+    setEditBannerUploading(false);
     setEditFormatData("");
     setEditPriceTierRows([createTierRow()]);
     setEditPromoBuyQuantity("");
@@ -357,7 +465,9 @@ export default function ProductsPage() {
     const buyQty = Number(editPromoBuyQuantity || "0");
     const bonusQty = Number(editPromoBonusQuantity || "0");
     const parsedPrice = Number.parseInt(editPrice || "0", 10);
+    const parsedPosition = Number.parseInt(editPosition || "", 10);
     const websitePrice = Number.isFinite(parsedPrice) ? Math.max(0, parsedPrice) : 0;
+    const websiteSortPosition = Number.isFinite(parsedPosition) ? Math.trunc(parsedPosition) : null;
     const hasPromo = buyQty > 0 || bonusQty > 0;
     if (hasPromo && (!Number.isFinite(buyQty) || !Number.isFinite(bonusQty) || buyQty < 1 || bonusQty < 1)) {
       setProductError("Khuyến mãi cần đủ 2 giá trị hợp lệ: mua X và tặng Y đều phải lớn hơn 0.");
@@ -367,37 +477,24 @@ export default function ProductsPage() {
     const websiteUpdatePayload = {
       website_name: editName || null,
       website_price: websitePrice,
+      website_sort_position: websiteSortPosition,
       website_price_tiers: tiers.length ? tiers : null,
       website_promo_buy_quantity: hasPromo ? Math.trunc(buyQty) : 0,
       website_promo_bonus_quantity: hasPromo ? Math.trunc(bonusQty) : 0,
+      website_banner_url: editBannerUrl.trim() || null,
       website_description: editDescription || null,
-      format_data: editFormatData || null,
+      website_format_data: editFormatData || null
     };
-
-    const fallbackUpdatePayload = {
-      name: editName,
-      price: websitePrice,
-      price_tiers: tiers.length ? tiers : null,
-      promo_buy_quantity: hasPromo ? Math.trunc(buyQty) : 0,
-      promo_bonus_quantity: hasPromo ? Math.trunc(bonusQty) : 0
-    };
-
-    let { error } = await supabase
+    const { error } = await supabase
       .from("products")
       .update(websiteUpdatePayload)
       .eq("id", editingProduct.id);
-    if (error && error.message.includes("website_")) {
-      const fallback = await supabase
-        .from("products")
-        .update({
-          ...fallbackUpdatePayload,
-          description: editDescription || null
-        })
-        .eq("id", editingProduct.id);
-      error = fallback.error;
-    }
     if (error) {
-      setProductError(error.message);
+      setProductError(
+        error.message.includes("website_")
+          ? "Thiếu cột website_* trong products. Hãy chạy SQL migration mới cho Website Dashboard."
+          : error.message
+      );
       return;
     }
     setProductError(null);
@@ -474,7 +571,12 @@ export default function ProductsPage() {
       <div className="topbar">
         <div>
           <h1 className="page-title">Website Products</h1>
-          <p className="muted">Giá, giá theo SL và khuyến mãi ở đây là bản Website riêng, không dùng chung với Bot Telegram.</p>
+          <p className="muted">Website dùng bộ dữ liệu Product riêng (tên, vị trí, giá, tier, khuyến mãi, format, hiển thị). Chỉ Stock được đồng bộ với Bot Telegram.</p>
+          {productChannelMode === "legacy" && (
+            <p className="muted" style={{ marginTop: 6 }}>
+              Đang chạy chế độ tương thích tạm (`is_hidden/is_deleted`). Để tách Website/Bot hoàn toàn, chạy SQL: <code>supabase_schema_website_product_channel_split.sql</code>
+            </p>
+          )}
         </div>
       </div>
 
@@ -483,6 +585,29 @@ export default function ProductsPage() {
         <form className="form-grid" onSubmit={handleAdd}>
           <input className="input" placeholder="Tên Website" value={name} onChange={(e) => setName(e.target.value)} required />
           <input className="input" placeholder="Giá Website (VND)" value={price} onChange={(e) => setPrice(e.target.value)} required />
+          <input className="input" placeholder="Vị trí Website (số, nhỏ hơn lên trước)" value={position} onChange={(e) => setPosition(e.target.value)} />
+          <div className="form-section">
+            <p className="muted" style={{ marginBottom: 6 }}>
+              Banner Hàng hóa (Website)
+            </p>
+            <input
+              className="input"
+              placeholder="URL ảnh hoặc storage://admin-uploads/..."
+              value={bannerUrl}
+              onChange={(e) => setBannerUrl(e.target.value)}
+            />
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
+              <input
+                className="input"
+                style={{ maxWidth: 360 }}
+                type="file"
+                accept="image/*"
+                onChange={(event) => handleBannerUpload(event, "add")}
+                disabled={bannerUploading}
+              />
+              <span className="muted">{bannerUploading ? "Đang upload ảnh..." : "Upload ảnh để tự điền URL banner"}</span>
+            </div>
+          </div>
           <input
             className="input"
             placeholder="Mô tả Website (hiển thị riêng cho Website)"
@@ -563,10 +688,12 @@ export default function ProductsPage() {
             <tr>
               <th>ID</th>
               <th>Tên Website</th>
+              <th>Vị trí Website</th>
               <th>Giá Website (VND)</th>
               <th>Giá theo SL Website</th>
               <th>Khuyến mãi Website</th>
               <th>Trạng thái</th>
+              <th>Banner Website</th>
               <th>Mô tả Website</th>
               <th>Format data</th>
               <th>Hành động</th>
@@ -577,6 +704,7 @@ export default function ProductsPage() {
               <tr key={product.id}>
                 <td>#{product.id}</td>
                 <td>{product.website_name || product.name}</td>
+                <td>{Number.isFinite(product.website_sort_position) ? product.website_sort_position : "-"}</td>
                 <td>{(product.website_price || 0).toLocaleString()}</td>
                 <td>{formatTierSummary(product.website_price_tiers)}</td>
                 <td>
@@ -585,20 +713,29 @@ export default function ProductsPage() {
                     : "Không"}
                 </td>
                 <td>
-                  {product.is_deleted
+                  {product.website_deleted
                     ? "Đã xóa mềm"
-                    : product.is_hidden
-                    ? "Đang ẩn"
-                    : "Đang hiển thị"}
+                    : product.website_enabled
+                    ? "Đang hiển thị"
+                    : "Đang ẩn"}
+                </td>
+                <td>
+                  {product.website_banner_url ? (
+                    <span className="muted" style={{ fontSize: 12, wordBreak: "break-all" }}>
+                      {product.website_banner_url}
+                    </span>
+                  ) : (
+                    <span className="muted">Chưa có</span>
+                  )}
                 </td>
                 <td>{product.description ?? ""}</td>
-                <td>{product.format_data ?? ""}</td>
+                <td>{product.website_format_data ?? ""}</td>
                 <td className="product-actions-cell">
                   <div className="product-row-actions">
                     <button className="button secondary action-pill" onClick={() => startEdit(product)}>
                       Chỉnh sửa
                     </button>
-                    {product.is_deleted ? (
+                    {product.website_deleted ? (
                       <button
                         className="button warning action-pill"
                         onClick={() => handleRestore(product)}
@@ -611,7 +748,7 @@ export default function ProductsPage() {
                           className="button warning action-pill"
                           onClick={() => handleToggleHidden(product)}
                         >
-                          {product.is_hidden ? "Bỏ ẩn" : "Ẩn"}
+                          {product.website_enabled ? "Ẩn" : "Bỏ ẩn"}
                         </button>
                         <button
                           className="button danger action-pill"
@@ -627,7 +764,7 @@ export default function ProductsPage() {
             ))}
             {!products.length && (
               <tr>
-                <td colSpan={9} className="muted">Chưa có sản phẩm.</td>
+                <td colSpan={11} className="muted">Chưa có sản phẩm.</td>
               </tr>
             )}
           </tbody>
@@ -699,6 +836,29 @@ export default function ProductsPage() {
             <form className="form-grid" onSubmit={handleUpdate}>
               <input className="input" placeholder="Tên Website" value={editName} onChange={(e) => setEditName(e.target.value)} required />
               <input className="input" placeholder="Giá Website (VND)" value={editPrice} onChange={(e) => setEditPrice(e.target.value)} required />
+              <input className="input" placeholder="Vị trí Website (số, nhỏ hơn lên trước)" value={editPosition} onChange={(e) => setEditPosition(e.target.value)} />
+              <div className="form-section">
+                <p className="muted" style={{ marginBottom: 6 }}>
+                  Banner Hàng hóa (Website)
+                </p>
+                <input
+                  className="input"
+                  placeholder="URL ảnh hoặc storage://admin-uploads/..."
+                  value={editBannerUrl}
+                  onChange={(e) => setEditBannerUrl(e.target.value)}
+                />
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}>
+                  <input
+                    className="input"
+                    style={{ maxWidth: 360 }}
+                    type="file"
+                    accept="image/*"
+                    onChange={(event) => handleBannerUpload(event, "edit")}
+                    disabled={editBannerUploading}
+                  />
+                  <span className="muted">{editBannerUploading ? "Đang upload ảnh..." : "Upload ảnh để tự điền URL banner"}</span>
+                </div>
+              </div>
               <textarea
                 className="textarea form-section"
                 placeholder="Mô tả Website (hiển thị riêng cho Website)"

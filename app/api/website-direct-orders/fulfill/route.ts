@@ -1,48 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { requireAdminSession } from "@/app/api/_shared/adminAuth";
+import {
+  DirectOrderFulfillmentError,
+  fulfillWebsiteDirectOrder
+} from "@/app/api/_shared/directOrderFulfillment";
 import { sendPaymentRelayNotification } from "@/app/api/_shared/paymentRelay";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 const rawExpireMinutes = Number(process.env.DIRECT_ORDER_PENDING_EXPIRE_MINUTES || "10");
 const DIRECT_ORDER_PENDING_EXPIRE_MINUTES = Number.isFinite(rawExpireMinutes)
   ? Math.max(1, rawExpireMinutes)
   : 10;
-const DIRECT_ORDER_PENDING_EXPIRE_MS = DIRECT_ORDER_PENDING_EXPIRE_MINUTES * 60 * 1000;
-
-const buildSupabaseClient = (token?: string) =>
-  createClient(supabaseUrl, supabaseAnonKey, {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false
-    },
-    global: token
-      ? {
-          headers: {
-            Authorization: `Bearer ${token}`
-          }
-        }
-      : undefined
-  });
-
-const isDirectOrderExpired = (createdAt: string | null | undefined) => {
-  if (!createdAt) return false;
-  const created = new Date(createdAt);
-  if (Number.isNaN(created.getTime())) return false;
-  return Date.now() - created.getTime() >= DIRECT_ORDER_PENDING_EXPIRE_MS;
-};
 
 export async function POST(request: NextRequest) {
-  if (!supabaseUrl || !supabaseAnonKey) {
-    return NextResponse.json({ error: "Supabase env missing." }, { status: 500 });
-  }
-
-  const authHeader = request.headers.get("authorization") || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-  if (!token) {
-    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
-  }
-
   let body: { orderId?: number | string };
   try {
     body = await request.json();
@@ -55,144 +24,46 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "orderId is required." }, { status: 400 });
   }
 
-  const authClient = buildSupabaseClient();
-  const { data: userData, error: userError } = await authClient.auth.getUser(token);
-  if (userError || !userData.user) {
-    return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+  const adminSession = await requireAdminSession(request);
+  if (adminSession.ok === false) {
+    return adminSession.response;
   }
 
-  const supabase = buildSupabaseClient(token);
-  const { data: adminRow, error: adminError } = await supabase
-    .from("admin_users")
-    .select("role")
-    .eq("user_id", userData.user.id)
-    .maybeSingle();
-
-  if (adminError || !adminRow) {
-    return NextResponse.json({ error: "Forbidden." }, { status: 403 });
-  }
-
-  const { data: directOrder, error: directOrderError } = await supabase
-    .from("website_direct_orders")
-    .select("id, auth_user_id, user_email, product_id, quantity, bonus_quantity, unit_price, amount, code, status, created_at")
-    .eq("id", orderId)
-    .maybeSingle();
-
-  if (directOrderError || !directOrder) {
-    return NextResponse.json({ error: "Website direct order not found." }, { status: 404 });
-  }
-
-  if (directOrder.status !== "pending") {
-    return NextResponse.json({ error: "Order already processed." }, { status: 400 });
-  }
-
-  const { data: product } = await supabase
-    .from("products")
-    .select("id, name")
-    .eq("id", directOrder.product_id)
-    .maybeSingle();
-  const productName = String(product?.name || `#${directOrder.product_id}`).trim();
-
-  if (isDirectOrderExpired(directOrder.created_at)) {
-    await supabase
-      .from("website_direct_orders")
-      .update({ status: "cancelled" })
-      .eq("id", directOrder.id);
-    return NextResponse.json(
-      { error: `Order expired after ${DIRECT_ORDER_PENDING_EXPIRE_MINUTES} minutes.` },
-      { status: 409 }
+  const orderGroup = `WEB${Date.now()}`;
+  let fulfillment;
+  try {
+    fulfillment = await fulfillWebsiteDirectOrder(
+      adminSession.supabase,
+      orderId,
+      DIRECT_ORDER_PENDING_EXPIRE_MINUTES,
+      orderGroup
     );
+  } catch (error) {
+    if (error instanceof DirectOrderFulfillmentError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+    return NextResponse.json({ error: "Failed to fulfill website order." }, { status: 500 });
   }
 
-  const bonusQuantity = Number(directOrder.bonus_quantity || 0);
-  const deliverQuantity = Math.max(1, Number(directOrder.quantity || 0) + Math.max(0, bonusQuantity));
+  const totalPrice = Number(fulfillment.amount || 0);
+  const productName = fulfillment.product_name;
 
-  const { data: stockRows, error: stockError } = await supabase
-    .from("stock")
-    .select("id, content")
-    .eq("product_id", directOrder.product_id)
-    .eq("sold", false)
-    .order("id", { ascending: true })
-    .limit(deliverQuantity);
-
-  if (stockError || !stockRows || stockRows.length < deliverQuantity) {
-    await supabase
-      .from("website_direct_orders")
-      .update({ status: "failed" })
-      .eq("id", directOrder.id);
-    return NextResponse.json({ error: "Not enough stock." }, { status: 409 });
-  }
-
-  const stockIds = stockRows.map((row) => row.id);
-  const items = stockRows.map((row) => row.content);
-
-  const { error: updateStockError } = await supabase
-    .from("stock")
-    .update({ sold: true })
-    .in("id", stockIds);
-
-  if (updateStockError) {
-    return NextResponse.json({ error: "Failed to update stock." }, { status: 500 });
-  }
-
-  const orderGroup = `WEB${new Date().toISOString().replace(/[-:.TZ]/g, "")}`;
-  const totalPrice =
-    Number(directOrder.amount || 0) ||
-    Number(directOrder.unit_price || 0) * Number(directOrder.quantity || 0);
-
-  const websiteOrderPayload = {
-    auth_user_id: directOrder.auth_user_id || null,
-    user_email: directOrder.user_email || null,
-    product_id: directOrder.product_id,
-    content: JSON.stringify(items),
-    price: totalPrice,
-    quantity: items.length,
-    order_group: orderGroup,
-    source_direct_code: directOrder.code,
-    created_at: new Date().toISOString()
-  };
-
-  const { data: insertedOrderRows, error: createOrderError } = await supabase
-    .from("website_orders")
-    .insert(websiteOrderPayload)
-    .select("id")
-    .limit(1);
-
-  if (createOrderError) {
-    return NextResponse.json({ error: "Failed to create website order." }, { status: 500 });
-  }
-
-  const fulfilledOrderId = insertedOrderRows?.[0]?.id ?? null;
-
-  const { error: updateDirectOrderError } = await supabase
-    .from("website_direct_orders")
-    .update({
-      status: "confirmed",
-      confirmed_at: new Date().toISOString(),
-      fulfilled_order_id: fulfilledOrderId
-    })
-    .eq("id", directOrder.id);
-
-  if (updateDirectOrderError) {
-    return NextResponse.json({ error: "Failed to update website direct order." }, { status: 500 });
-  }
-
-  await sendPaymentRelayNotification(supabase, [
+  await sendPaymentRelayNotification(adminSession.supabase, [
     "✅ Thanh toán thành công (Duyệt tay Website)",
-    `Mã direct order: ${directOrder.id}`,
-    `Mã website order: ${fulfilledOrderId ?? "-"}`,
-    `Mã thanh toán: ${directOrder.code}`,
+    `Mã direct order: ${fulfillment.website_direct_order_id}`,
+    `Mã website order: ${fulfillment.website_order_id ?? "-"}`,
+    `Mã thanh toán: ${fulfillment.code}`,
     `Số tiền: ${totalPrice.toLocaleString("vi-VN")}đ`,
-    `Mã user website: ${directOrder.auth_user_id ?? "-"}`,
-    `Email user: ${directOrder.user_email ?? "-"}`,
+    `Mã user website: ${fulfillment.auth_user_id || "-"}`,
+    `Email user: ${fulfillment.user_email || "-"}`,
     `Sản phẩm: ${productName}`,
-    `SL thanh toán: ${directOrder.quantity}`,
-    `SL giao: ${items.length}`,
-    `SL khuyến mãi: ${bonusQuantity}`
+    `SL thanh toán: ${fulfillment.quantity}`,
+    `SL giao: ${fulfillment.items.length}`,
+    `SL khuyến mãi: ${fulfillment.bonus_quantity}`
   ]);
 
   return NextResponse.json({
     success: true,
-    fulfilled_order_id: fulfilledOrderId
+    fulfilled_order_id: fulfillment.website_order_id
   });
 }

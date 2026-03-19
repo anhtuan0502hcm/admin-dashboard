@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
+import { performAdminFinanceAction } from "@/lib/adminFinanceClient";
 
 interface Withdrawal {
   id: number;
@@ -14,6 +15,9 @@ interface Withdrawal {
 
 export default function WithdrawalsPage() {
   const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
+  const [status, setStatus] = useState<string | null>(null);
+  const [statusTone, setStatusTone] = useState<"success" | "error" | null>(null);
+  const [actionKey, setActionKey] = useState<string | null>(null);
 
   const load = async () => {
     const { data } = await supabase
@@ -29,30 +33,39 @@ export default function WithdrawalsPage() {
   }, []);
 
   const confirmWithdrawal = async (withdrawal: Withdrawal) => {
-    const { data: userRow } = await supabase
-      .from("users")
-      .select("balance")
-      .eq("user_id", withdrawal.user_id)
-      .maybeSingle();
-
-    const balance = userRow?.balance || 0;
-    if (balance < withdrawal.amount) {
-      alert("Không đủ số dư.");
-      return;
+    const nextActionKey = `confirm:${withdrawal.id}`;
+    setActionKey(nextActionKey);
+    setStatus(null);
+    setStatusTone(null);
+    try {
+      await performAdminFinanceAction("withdrawal", "confirm", withdrawal.id);
+      setStatus(`✅ Đã duyệt yêu cầu rút #${withdrawal.id}.`);
+      setStatusTone("success");
+      await load();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Không thể duyệt yêu cầu rút tiền.");
+      setStatusTone("error");
+    } finally {
+      setActionKey(null);
     }
-
-    await supabase
-      .from("users")
-      .update({ balance: balance - withdrawal.amount })
-      .eq("user_id", withdrawal.user_id);
-
-    await supabase.from("withdrawals").update({ status: "confirmed" }).eq("id", withdrawal.id);
-    await load();
   };
 
   const cancelWithdrawal = async (withdrawal: Withdrawal) => {
-    await supabase.from("withdrawals").update({ status: "cancelled" }).eq("id", withdrawal.id);
-    await load();
+    const nextActionKey = `cancel:${withdrawal.id}`;
+    setActionKey(nextActionKey);
+    setStatus(null);
+    setStatusTone(null);
+    try {
+      await performAdminFinanceAction("withdrawal", "cancel", withdrawal.id);
+      setStatus(`✅ Đã từ chối yêu cầu rút #${withdrawal.id}.`);
+      setStatusTone("success");
+      await load();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Không thể từ chối yêu cầu rút tiền.");
+      setStatusTone("error");
+    } finally {
+      setActionKey(null);
+    }
   };
 
   return (
@@ -65,6 +78,17 @@ export default function WithdrawalsPage() {
       </div>
 
       <div className="card">
+        {status && (
+          <p
+            className="muted"
+            style={{
+              marginBottom: 12,
+              color: statusTone === "error" ? "var(--danger)" : "#20705b"
+            }}
+          >
+            {status}
+          </p>
+        )}
         <table className="table">
           <thead>
             <tr>
@@ -85,9 +109,20 @@ export default function WithdrawalsPage() {
                 <td>{withdrawal.momo_phone}</td>
                 <td>{new Date(withdrawal.created_at).toLocaleString()}</td>
                 <td>
-                  <button className="button" onClick={() => confirmWithdrawal(withdrawal)}>Duyệt</button>
-                  <button className="button secondary" style={{ marginLeft: 8 }} onClick={() => cancelWithdrawal(withdrawal)}>
-                    Từ chối
+                  <button
+                    className="button"
+                    disabled={actionKey === `confirm:${withdrawal.id}` || actionKey === `cancel:${withdrawal.id}`}
+                    onClick={() => confirmWithdrawal(withdrawal)}
+                  >
+                    {actionKey === `confirm:${withdrawal.id}` ? "Đang duyệt..." : "Duyệt"}
+                  </button>
+                  <button
+                    className="button secondary"
+                    style={{ marginLeft: 8 }}
+                    disabled={actionKey === `confirm:${withdrawal.id}` || actionKey === `cancel:${withdrawal.id}`}
+                    onClick={() => cancelWithdrawal(withdrawal)}
+                  >
+                    {actionKey === `cancel:${withdrawal.id}` ? "Đang từ chối..." : "Từ chối"}
                   </button>
                 </td>
               </tr>
