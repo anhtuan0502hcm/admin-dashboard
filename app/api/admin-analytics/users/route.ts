@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import { getUsersSnapshot } from "@/app/api/_shared/adminAnalytics";
+import { getOrSetServerCache } from "@/app/api/_shared/serverCache";
+import { buildServerTimingHeader } from "@/app/api/_shared/serverTiming";
+
+const USERS_CACHE_TTL_MS = 10_000;
 
 export async function GET(request: NextRequest) {
+  const routeStartedAt = performance.now();
   const adminSession = await requireAdminSession(request);
+  const authDuration = performance.now() - routeStartedAt;
   if (adminSession.ok === false) {
     return adminSession.response;
   }
@@ -15,14 +21,29 @@ export async function GET(request: NextRequest) {
   const pageSize = Number.isFinite(pageSizeParam) ? pageSizeParam : 50;
 
   try {
-    const data = await getUsersSnapshot(adminSession.supabase, {
-      page,
-      pageSize,
-      search
-    });
-    return NextResponse.json({ success: true, data });
+    const cacheKey = `admin-analytics:users:v2:${page}:${pageSize}:${search.trim().toLowerCase()}`;
+    const analyticsStartedAt = performance.now();
+    const { value: data, hit } = await getOrSetServerCache(cacheKey, USERS_CACHE_TTL_MS, () =>
+      getUsersSnapshot(adminSession.supabase, {
+        page,
+        pageSize,
+        search
+      })
+    );
+    const analyticsDuration = performance.now() - analyticsStartedAt;
+    const response = NextResponse.json({ success: true, data });
+    response.headers.set(
+      "Server-Timing",
+      buildServerTimingHeader([
+        { name: "auth", duration: authDuration },
+        { name: "analytics", duration: analyticsDuration, description: hit ? "cache-hit" : "cache-miss" },
+        { name: "total", duration: performance.now() - routeStartedAt }
+      ])
+    );
+    response.headers.set("X-Admin-Analytics-Cache", hit ? "hit" : "miss");
+    return response;
   } catch (error) {
-    return NextResponse.json(
+    const response = NextResponse.json(
       {
         error:
           error instanceof Error && error.message.trim()
@@ -31,5 +52,13 @@ export async function GET(request: NextRequest) {
       },
       { status: 500 }
     );
+    response.headers.set(
+      "Server-Timing",
+      buildServerTimingHeader([
+        { name: "auth", duration: authDuration },
+        { name: "total", duration: performance.now() - routeStartedAt, description: "error" }
+      ])
+    );
+    return response;
   }
 }
