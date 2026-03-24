@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 
-type FinanceResource = "deposit" | "withdrawal" | "binance_deposit" | "usdt_withdrawal";
+type FinanceResource = "deposit" | "withdrawal" | "usdt_withdrawal";
 type FinanceAction = "confirm" | "cancel";
 
 type FinanceRequestBody = {
@@ -26,10 +26,6 @@ const RPC_BY_ACTION: Record<
   withdrawal: {
     confirm: "admin_confirm_withdrawal",
     cancel: "admin_cancel_withdrawal"
-  },
-  binance_deposit: {
-    confirm: "admin_confirm_binance_deposit",
-    cancel: "admin_cancel_binance_deposit"
   },
   usdt_withdrawal: {
     confirm: "admin_confirm_usdt_withdrawal",
@@ -61,7 +57,6 @@ const mapBusinessError = (message: string) => {
   if (
     lowered.includes("deposit_not_found") ||
     lowered.includes("withdrawal_not_found") ||
-    lowered.includes("binance_deposit_not_found") ||
     lowered.includes("usdt_withdrawal_not_found") ||
     lowered.includes("user_not_found")
   ) {
@@ -70,7 +65,6 @@ const mapBusinessError = (message: string) => {
   if (
     lowered.includes("deposit_not_pending") ||
     lowered.includes("withdrawal_not_pending") ||
-    lowered.includes("binance_deposit_not_pending") ||
     lowered.includes("usdt_withdrawal_not_pending")
   ) {
     return { status: 409, error: "Yêu cầu không còn ở trạng thái chờ xử lý." };
@@ -267,78 +261,6 @@ const fallbackWithdrawalAction = async (
   };
 };
 
-const fallbackBinanceDepositAction = async (
-  supabase: SupabaseClient,
-  action: FinanceAction,
-  recordId: number
-): Promise<FinanceActionResult> => {
-  const { data: deposit, error: depositError } = await supabase
-    .from("binance_deposits")
-    .select("id, user_id, usdt_amount, status")
-    .eq("id", recordId)
-    .maybeSingle();
-
-  if (depositError || !deposit) {
-    return { ok: false, status: 404, error: "Không tìm thấy yêu cầu nạp USDT." };
-  }
-  if (deposit.status !== "pending") {
-    return notPending();
-  }
-
-  if (action === "cancel") {
-    const { error } = await supabase
-      .from("binance_deposits")
-      .update({ status: "cancelled" })
-      .eq("id", deposit.id);
-    if (error) {
-      return { ok: false, status: 500, error: error.message || "Không thể hủy yêu cầu nạp USDT." };
-    }
-    return {
-      ok: true,
-      data: {
-        record_id: deposit.id,
-        status: "cancelled"
-      }
-    };
-  }
-
-  const { data: userRow, error: userError } = await supabase
-    .from("users")
-    .select("balance_usdt")
-    .eq("user_id", deposit.user_id)
-    .maybeSingle();
-  if (userError || !userRow) {
-    return { ok: false, status: 404, error: "Không tìm thấy user." };
-  }
-
-  const nextBalance = Number(userRow.balance_usdt || 0) + Number(deposit.usdt_amount || 0);
-  const { error: balanceError } = await supabase
-    .from("users")
-    .update({ balance_usdt: nextBalance })
-    .eq("user_id", deposit.user_id);
-  if (balanceError) {
-    return { ok: false, status: 500, error: balanceError.message || "Không thể cộng số dư USDT." };
-  }
-
-  const { error: updateError } = await supabase
-    .from("binance_deposits")
-    .update({ status: "confirmed" })
-    .eq("id", deposit.id);
-  if (updateError) {
-    return { ok: false, status: 500, error: updateError.message || "Không thể duyệt yêu cầu nạp USDT." };
-  }
-
-  return {
-    ok: true,
-    data: {
-      record_id: deposit.id,
-      user_id: deposit.user_id,
-      status: "confirmed",
-      new_balance: nextBalance
-    }
-  };
-};
-
 const fallbackUsdtWithdrawalAction = async (
   supabase: SupabaseClient,
   action: FinanceAction,
@@ -428,8 +350,6 @@ const runFallbackAction = (
       return fallbackDepositAction(supabase, action, recordId);
     case "withdrawal":
       return fallbackWithdrawalAction(supabase, action, recordId);
-    case "binance_deposit":
-      return fallbackBinanceDepositAction(supabase, action, recordId);
     case "usdt_withdrawal":
       return fallbackUsdtWithdrawalAction(supabase, action, recordId);
     default:

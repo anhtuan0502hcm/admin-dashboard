@@ -8,7 +8,12 @@ const SETTINGS_KEYS = [
   "account_number",
   "account_name",
   "sepay_token",
-  "binance_pay_id",
+  "binance_api_key",
+  "binance_api_secret",
+  "binance_direct_enabled",
+  "binance_direct_coin",
+  "binance_direct_network",
+  "binance_direct_rate",
   "admin_contact",
   "support_contacts",
   "shop_intro_text",
@@ -21,7 +26,6 @@ const SETTINGS_KEYS = [
   "show_balance",
   "show_deposit",
   "show_withdraw",
-  "show_usdt",
   "show_history",
   "show_language",
   "show_support"
@@ -32,7 +36,6 @@ const TOGGLE_FIELDS = [
   { key: "show_balance", label: 'Hiện "Số dư"' },
   { key: "show_deposit", label: 'Hiện "Nạp tiền"' },
   { key: "show_withdraw", label: 'Hiện "Rút tiền"' },
-  { key: "show_usdt", label: 'Hiện "Nạp USDT"' },
   { key: "show_history", label: 'Hiện "Lịch sử"' },
   { key: "show_language", label: 'Hiện "Ngôn ngữ"' },
   { key: "show_support", label: 'Hiện "Hỗ trợ"' },
@@ -117,16 +120,55 @@ export default function SettingsPage() {
           />
           <input
             className="input"
-            placeholder="Binance Pay ID"
-            value={values.binance_pay_id || ""}
-            onChange={(e) => updateField("binance_pay_id", e.target.value)}
-          />
-          <input
-            className="input"
             placeholder="Admin contact"
             value={values.admin_contact || ""}
             onChange={(e) => updateField("admin_contact", e.target.value)}
           />
+          <div className="form-section">
+            <div className="section-title">Binance on-chain auto payment</div>
+            <p className="muted" style={{ marginBottom: 10 }}>
+              Dùng cho checkout tự động bằng Binance trong bot Telegram. Có thể nhập tên phổ biến của network như `TRC20`, `BEP20`, `ERC20`; hệ thống sẽ tự map sang mã Binance tương ứng.
+            </p>
+            <label className="toggle" style={{ marginBottom: 12 }}>
+              <input
+                type="checkbox"
+                checked={(values.binance_direct_enabled ?? "false") === "true"}
+                onChange={(e) => updateField("binance_direct_enabled", e.target.checked ? "true" : "false")}
+              />
+              <span>Bật Binance on-chain</span>
+            </label>
+            <input
+              className="input"
+              placeholder="Binance API Key"
+              value={values.binance_api_key || ""}
+              onChange={(e) => updateField("binance_api_key", e.target.value)}
+            />
+            <input
+              className="input"
+              type="password"
+              placeholder="Binance API Secret"
+              value={values.binance_api_secret || ""}
+              onChange={(e) => updateField("binance_api_secret", e.target.value)}
+            />
+            <input
+              className="input"
+              placeholder="Coin (ví dụ: USDT)"
+              value={values.binance_direct_coin || "USDT"}
+              onChange={(e) => updateField("binance_direct_coin", e.target.value)}
+            />
+            <input
+              className="input"
+              placeholder="Network (ví dụ: TRX / TRC20, BSC / BEP20, ETH / ERC20)"
+              value={values.binance_direct_network || ""}
+              onChange={(e) => updateField("binance_direct_network", e.target.value)}
+            />
+            <input
+              className="input"
+              placeholder="Tỷ giá VND / 1 coin (ví dụ: 25000)"
+              value={values.binance_direct_rate || ""}
+              onChange={(e) => updateField("binance_direct_rate", e.target.value)}
+            />
+          </div>
           <div className="form-section">
             <div className="section-title">Text menu Danh mục</div>
             <p className="muted" style={{ marginBottom: 10 }}>
@@ -208,8 +250,8 @@ export default function SettingsPage() {
             value={values.payment_mode || "hybrid"}
             onChange={(e) => updateField("payment_mode", e.target.value)}
           >
-            <option value="direct">Thanh toán VietQR luôn</option>
-            <option value="hybrid">Thiếu balance thì VietQR</option>
+            <option value="direct">Luôn thanh toán trực tiếp</option>
+            <option value="hybrid">Thiếu balance thì thanh toán trực tiếp</option>
             <option value="balance">Chỉ mua bằng balance</option>
           </select>
           <div className="form-section">

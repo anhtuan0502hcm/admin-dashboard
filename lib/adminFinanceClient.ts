@@ -2,7 +2,7 @@
 
 import { supabase } from "@/lib/supabaseClient";
 
-export type FinanceResource = "deposit" | "withdrawal" | "binance_deposit" | "usdt_withdrawal";
+export type FinanceResource = "deposit" | "withdrawal" | "usdt_withdrawal";
 export type FinanceAction = "confirm" | "cancel";
 
 export async function performAdminFinanceAction(

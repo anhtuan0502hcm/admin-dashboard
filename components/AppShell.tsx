@@ -16,6 +16,7 @@ const navItems = [
   { href: "/usdt", label: "USDT" },
   { href: "/users", label: "Users" },
   { href: "/reports", label: "Reports" },
+  { href: "/licenses", label: "Licenses" },
   { href: "/settings", label: "Settings" }
 ];
 
