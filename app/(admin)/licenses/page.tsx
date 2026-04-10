@@ -6,6 +6,7 @@ import {
   fetchLicenseExtensions,
   fetchLicenseKeys,
   reactivateLicenseKey,
+  resetLicenseActivation,
   resetLicenseKeyActivation,
   revokeLicenseKey,
   saveLicenseExtension,
@@ -16,6 +17,7 @@ import type {
   LicenseActivationRecord,
   LicenseExtensionRecord,
   LicenseKeyAdminStatus,
+  LicenseKeyDeviceLimitMode,
   LicenseKeyRecord
 } from "@/lib/licenseTypes";
 
@@ -66,6 +68,26 @@ const getActivationStatusLabel = (status: LicenseActivationAdminStatus) => {
   return "Đã reset";
 };
 
+const getDeviceLimitModeLabel = (mode: LicenseKeyDeviceLimitMode) =>
+  mode === "unlimited_devices" ? "Không giới hạn" : "1 thiết bị";
+
+const summarizeActiveFingerprints = (key: LicenseKeyRecord) => {
+  if (!key.activeActivations.length) {
+    return "-";
+  }
+
+  const preview = key.activeActivations
+    .slice(0, 2)
+    .map((activation) => activation.fingerprint)
+    .join(", ");
+
+  if (key.activeActivations.length <= 2) {
+    return preview;
+  }
+
+  return `${preview} +${key.activeActivations.length - 2} thiết bị`;
+};
+
 export default function LicensesPage() {
   const [tab, setTab] = useState<LicenseTab>("extensions");
   const [extensions, setExtensions] = useState<LicenseExtensionRecord[]>([]);
@@ -90,9 +112,11 @@ export default function LicensesPage() {
   const [keyExtensionId, setKeyExtensionId] = useState("");
   const [keyExpiresAt, setKeyExpiresAt] = useState(createDefaultExpiryInput());
   const [keyNote, setKeyNote] = useState("");
+  const [keyDeviceLimitMode, setKeyDeviceLimitMode] = useState<LicenseKeyDeviceLimitMode>("single_device");
   const [editingKey, setEditingKey] = useState<LicenseKeyRecord | null>(null);
   const [editKeyExpiresAt, setEditKeyExpiresAt] = useState(createDefaultExpiryInput());
   const [editKeyNote, setEditKeyNote] = useState("");
+  const [editKeyDeviceLimitMode, setEditKeyDeviceLimitMode] = useState<LicenseKeyDeviceLimitMode>("single_device");
   const [latestCreatedKey, setLatestCreatedKey] = useState<{
     rawKey: string;
     maskedKey: string;
@@ -246,7 +270,8 @@ export default function LicensesPage() {
       const response = await saveLicenseKey({
         extensionId: Number(keyExtensionId),
         expiresAt: new Date(keyExpiresAt).toISOString(),
-        note: keyNote
+        note: keyNote,
+        deviceLimitMode: keyDeviceLimitMode
       });
       const extension = extensions.find((item) => item.id === Number(keyExtensionId));
       setLatestCreatedKey(
@@ -261,6 +286,7 @@ export default function LicensesPage() {
       );
       setKeyNote("");
       setKeyExpiresAt(createDefaultExpiryInput());
+      setKeyDeviceLimitMode("single_device");
       setStatusMessage("Đã tạo license key mới. Hãy lưu raw key ngay bây giờ.");
       await Promise.all([loadExtensions(), loadKeys(), loadActivations()]);
     } catch (error) {
@@ -274,6 +300,7 @@ export default function LicensesPage() {
     setEditingKey(key);
     setEditKeyExpiresAt(toDateTimeLocalValue(key.expiresAt));
     setEditKeyNote(key.note || "");
+    setEditKeyDeviceLimitMode(key.deviceLimitMode);
   };
 
   const handleUpdateKey = async (event: React.FormEvent) => {
@@ -282,13 +309,18 @@ export default function LicensesPage() {
     clearFeedback();
     setBusyAction(`save-key-${editingKey.id}`);
     try {
-      await saveLicenseKey({
+      const response = await saveLicenseKey({
         id: editingKey.id,
         expiresAt: new Date(editKeyExpiresAt).toISOString(),
-        note: editKeyNote
+        note: editKeyNote,
+        deviceLimitMode: editKeyDeviceLimitMode
       });
       setEditingKey(null);
-      setStatusMessage("Đã cập nhật license key.");
+      setStatusMessage(
+        response.prunedActivationCount
+          ? `Đã cập nhật license key và reset ${response.prunedActivationCount} bind dư để áp dụng chế độ 1 thiết bị.`
+          : "Đã cập nhật license key."
+      );
       await Promise.all([loadExtensions(), loadKeys(), loadActivations()]);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Không thể cập nhật license key.");
@@ -328,18 +360,35 @@ export default function LicensesPage() {
     }
   };
 
-  const handleResetActivation = async (keyId: number) => {
-    if (!window.confirm("Reset bind hiện tại của key này?")) {
+  const handleResetAllActivations = async (keyId: number) => {
+    if (!window.confirm("Reset tất cả bind hiện tại của key này?")) {
       return;
     }
     clearFeedback();
     setBusyAction(`reset-key-${keyId}`);
     try {
       await resetLicenseKeyActivation(keyId);
-      setStatusMessage("Đã reset activation hiện tại.");
+      setStatusMessage("Đã reset tất cả bind hiện tại của key.");
       await Promise.all([loadExtensions(), loadKeys(), loadActivations()]);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Không thể reset activation.");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleResetSingleActivation = async (activation: LicenseActivationRecord) => {
+    if (!window.confirm(`Reset bind cho fingerprint "${activation.fingerprint}"?`)) {
+      return;
+    }
+    clearFeedback();
+    setBusyAction(`reset-activation-${activation.id}`);
+    try {
+      await resetLicenseActivation(activation.id);
+      setStatusMessage("Đã reset activation được chọn.");
+      await Promise.all([loadExtensions(), loadKeys(), loadActivations()]);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Không thể reset activation này.");
     } finally {
       setBusyAction(null);
     }
@@ -572,6 +621,14 @@ export default function LicensesPage() {
                   onChange={(event) => setKeyExpiresAt(event.target.value)}
                   required
                 />
+                <select
+                  className="select"
+                  value={keyDeviceLimitMode}
+                  onChange={(event) => setKeyDeviceLimitMode(event.target.value as LicenseKeyDeviceLimitMode)}
+                >
+                  <option value="single_device">1 thiết bị</option>
+                  <option value="unlimited_devices">Không giới hạn thiết bị</option>
+                </select>
               </div>
               <textarea
                 className="textarea"
@@ -646,7 +703,8 @@ export default function LicensesPage() {
                     <th>Key</th>
                     <th>Extension</th>
                     <th>Trạng thái</th>
-                    <th>Fingerprint</th>
+                    <th>Thiết bị</th>
+                    <th>Fingerprints đang bind</th>
                     <th>Hết hạn</th>
                     <th>Ghi chú</th>
                     <th>Tạo lúc</th>
@@ -668,7 +726,11 @@ export default function LicensesPage() {
                           {getKeyStatusLabel(key.status)}
                         </span>
                       </td>
-                      <td className="cell-truncate">{key.activeActivation?.fingerprint || "-"}</td>
+                      <td>
+                        <div className="license-code">{getDeviceLimitModeLabel(key.deviceLimitMode)}</div>
+                        <div className="muted">{key.activeActivationCount} bind đang hoạt động</div>
+                      </td>
+                      <td className="cell-truncate">{summarizeActiveFingerprints(key)}</td>
                       <td>{formatDateTime(key.expiresAt)}</td>
                       <td className="cell-truncate">{key.note || "-"}</td>
                       <td>{formatDateTime(key.createdAt)}</td>
@@ -699,10 +761,10 @@ export default function LicensesPage() {
                           <button
                             className="button danger action-pill"
                             type="button"
-                            onClick={() => handleResetActivation(key.id)}
+                            onClick={() => handleResetAllActivations(key.id)}
                             disabled={busyAction === `reset-key-${key.id}`}
                           >
-                            Reset bind
+                            Reset tất cả bind
                           </button>
                         </div>
                       </td>
@@ -710,7 +772,7 @@ export default function LicensesPage() {
                   ))}
                   {!keys.length && (
                     <tr>
-                      <td colSpan={8} className="muted">
+                      <td colSpan={9} className="muted">
                         Chưa có license key nào.
                       </td>
                     </tr>
@@ -788,10 +850,10 @@ export default function LicensesPage() {
                         <button
                           className="button danger action-pill"
                           type="button"
-                          onClick={() => handleResetActivation(activation.licenseKeyId)}
-                          disabled={busyAction === `reset-key-${activation.licenseKeyId}`}
+                          onClick={() => handleResetSingleActivation(activation)}
+                          disabled={busyAction === `reset-activation-${activation.id}`}
                         >
-                          Reset bind
+                          Reset bind này
                         </button>
                       </div>
                     </td>
@@ -870,6 +932,14 @@ export default function LicensesPage() {
                   onChange={(event) => setEditKeyExpiresAt(event.target.value)}
                   required
                 />
+                <select
+                  className="select"
+                  value={editKeyDeviceLimitMode}
+                  onChange={(event) => setEditKeyDeviceLimitMode(event.target.value as LicenseKeyDeviceLimitMode)}
+                >
+                  <option value="single_device">1 thiết bị</option>
+                  <option value="unlimited_devices">Không giới hạn thiết bị</option>
+                </select>
               </div>
               <textarea
                 className="textarea"

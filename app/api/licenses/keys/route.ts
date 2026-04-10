@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { requireAdminSession } from "@/app/api/_shared/adminAuth";
 import {
   generateLicenseKey,
@@ -7,9 +8,10 @@ import {
   hashSecret,
   listLicenseKeys,
   maskLicenseKey,
+  normalizeLicenseKeyDeviceLimitMode,
   normalizeOptionalText
 } from "@/app/api/_shared/license";
-import type { LicenseKeyAdminStatus } from "@/lib/licenseTypes";
+import type { LicenseKeyAdminStatus, LicenseKeyDeviceLimitMode } from "@/lib/licenseTypes";
 
 const toPositiveInt = (value: unknown) => {
   const parsed = Number(value);
@@ -26,6 +28,43 @@ const parseExpiresAt = (value: unknown) => {
 const isDuplicateError = (message: string) => {
   const lowered = message.toLowerCase();
   return lowered.includes("duplicate key") || lowered.includes("already exists");
+};
+
+const collapseToSingleDeviceIfNeeded = async (supabase: SupabaseClient, licenseKeyId: number) => {
+  const { data: activationRows, error: activationError } = await supabase
+    .from("license_activations")
+    .select("id")
+    .eq("license_key_id", licenseKeyId)
+    .is("deactivated_at", null)
+    .order("last_checked_at", { ascending: false })
+    .order("activated_at", { ascending: false });
+
+  if (activationError) {
+    throw activationError;
+  }
+
+  if (!activationRows || activationRows.length <= 1) {
+    return 0;
+  }
+
+  const idsToDeactivate = activationRows.slice(1).map((row) => row.id);
+  if (!idsToDeactivate.length) {
+    return 0;
+  }
+
+  const { error } = await supabase
+    .from("license_activations")
+    .update({
+      deactivated_at: new Date().toISOString(),
+      deactivation_reason: "admin_single_device_enforced"
+    })
+    .in("id", idsToDeactivate);
+
+  if (error) {
+    throw error;
+  }
+
+  return idsToDeactivate.length;
 };
 
 export async function GET(request: NextRequest) {
@@ -64,6 +103,7 @@ export async function POST(request: NextRequest) {
     extensionId?: number;
     expiresAt?: string;
     note?: string;
+    deviceLimitMode?: LicenseKeyDeviceLimitMode;
   };
   try {
     body = await request.json();
@@ -74,6 +114,7 @@ export async function POST(request: NextRequest) {
   const licenseKeyId = toPositiveInt(body.id);
   const expiresAt = parseExpiresAt(body.expiresAt);
   const note = normalizeOptionalText(body.note, 1000);
+  const deviceLimitMode = normalizeLicenseKeyDeviceLimitMode(body.deviceLimitMode);
 
   if (!expiresAt) {
     return NextResponse.json({ error: "Ngày hết hạn không hợp lệ." }, { status: 400 });
@@ -98,7 +139,8 @@ export async function POST(request: NextRequest) {
       .from("license_keys")
       .update({
         expires_at: expiresAt,
-        note
+        note,
+        device_limit_mode: deviceLimitMode
       })
       .eq("id", licenseKeyId);
 
@@ -106,7 +148,19 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: error.message || "Không thể cập nhật license key." }, { status: 500 });
     }
 
-    return NextResponse.json({ success: true, data: { ok: true, id: licenseKeyId } });
+    let prunedActivationCount = 0;
+    if (deviceLimitMode === "single_device") {
+      try {
+        prunedActivationCount = await collapseToSingleDeviceIfNeeded(adminSession.supabase, licenseKeyId);
+      } catch (error) {
+        return NextResponse.json(
+          { error: error instanceof Error ? error.message : "Không thể đồng bộ activation sau khi cập nhật key." },
+          { status: 500 }
+        );
+      }
+    }
+
+    return NextResponse.json({ success: true, data: { ok: true, id: licenseKeyId, prunedActivationCount } });
   }
 
   const extensionId = toPositiveInt(body.extensionId);
@@ -144,7 +198,8 @@ export async function POST(request: NextRequest) {
         key_suffix: getKeySuffix(rawKey),
         status: "active",
         expires_at: expiresAt,
-        note
+        note,
+        device_limit_mode: deviceLimitMode
       })
       .select("id")
       .maybeSingle();

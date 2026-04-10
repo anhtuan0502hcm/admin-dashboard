@@ -5,6 +5,7 @@ import type {
   LicenseActivationRecord,
   LicenseExtensionRecord,
   LicenseKeyAdminStatus,
+  LicenseKeyDeviceLimitMode,
   LicenseKeyRecord
 } from "@/lib/licenseTypes";
 
@@ -79,11 +80,15 @@ export const saveLicenseKey = (payload: {
   extensionId?: number;
   expiresAt?: string;
   note?: string;
+  deviceLimitMode?: LicenseKeyDeviceLimitMode;
 }) =>
-  requestAdminApi<{ ok: true; id: number; rawKey?: string; maskedKey?: string }>("/api/licenses/keys", {
+  requestAdminApi<{ ok: true; id: number; rawKey?: string; maskedKey?: string; prunedActivationCount?: number }>(
+    "/api/licenses/keys",
+    {
     method: "POST",
     body: JSON.stringify(payload)
-  });
+    }
+  );
 
 export const revokeLicenseKey = (id: number) =>
   requestAdminApi<{ ok: true }>(`/api/licenses/keys/${id}/revoke`, {
@@ -114,3 +119,8 @@ export const fetchLicenseActivations = (filters?: {
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return requestAdminApi<LicenseActivationRecord[]>(`/api/licenses/activations${suffix}`);
 };
+
+export const resetLicenseActivation = (id: number) =>
+  requestAdminApi<{ ok: true; alreadyReset?: boolean }>(`/api/licenses/activations/${id}/reset`, {
+    method: "POST"
+  });

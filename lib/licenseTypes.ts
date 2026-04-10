@@ -9,6 +9,7 @@ export type LicensePublicStatus =
   | "not_found";
 
 export type LicenseKeyAdminStatus = "active" | "expired" | "revoked";
+export type LicenseKeyDeviceLimitMode = "single_device" | "unlimited_devices";
 
 export type LicenseActivationAdminStatus =
   | "active"
@@ -52,6 +53,9 @@ export type LicenseKeyRecord = {
   note: string | null;
   createdAt: string;
   updatedAt: string;
+  deviceLimitMode: LicenseKeyDeviceLimitMode;
+  activeActivationCount: number;
+  activeActivations: LicenseKeyActivationSummary[];
   activeActivation: LicenseKeyActivationSummary | null;
 };
 

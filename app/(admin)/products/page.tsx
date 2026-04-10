@@ -18,6 +18,7 @@ interface PriceTierRow {
 interface Product {
   id: number;
   sort_position: number | null;
+  bot_folder_id: number | null;
   name: string;
   price: number;
   price_usdt: number;
@@ -34,6 +35,12 @@ interface FormatTemplate {
   id: number;
   name: string;
   pattern: string;
+}
+
+interface BotFolder {
+  id: number;
+  name: string;
+  sort_position: number | null;
 }
 
 type ProductListTab = "visible" | "hidden" | "deleted";
@@ -60,6 +67,29 @@ const sortProductsByPosition = (items: Product[]) =>
       if (aPos !== bPos) return aPos - bPos;
       return a.id - b.id;
     });
+
+const sortFoldersByPosition = (items: BotFolder[]) =>
+  items
+    .slice()
+    .sort((a, b) => {
+      const aPos = a.sort_position;
+      const bPos = b.sort_position;
+      if (aPos === null && bPos === null) return a.id - b.id;
+      if (aPos === null) return 1;
+      if (bPos === null) return -1;
+      if (aPos !== bPos) return aPos - bPos;
+      return a.id - b.id;
+    });
+
+const parseOptionalFolderId = (value: string): number | null => {
+  const normalized = value.trim();
+  if (!normalized) return null;
+  const numeric = Number(normalized);
+  if (!Number.isFinite(numeric)) return null;
+  const parsed = Math.trunc(numeric);
+  if (parsed < 1) return null;
+  return parsed;
+};
 
 const createTierRow = (tier?: PriceTier): PriceTierRow => ({
   id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -106,23 +136,33 @@ type PositionShiftRow = {
 export default function ProductsPage() {
   const adminSession = useAdminSession();
   const [products, setProducts] = useState<Product[]>([]);
+  const [folders, setFolders] = useState<BotFolder[]>([]);
   const [productListTab, setProductListTab] = useState<ProductListTab>("visible");
   const [formatTemplates, setFormatTemplates] = useState<FormatTemplate[]>([]);
   const [productError, setProductError] = useState<string | null>(null);
+  const [folderError, setFolderError] = useState<string | null>(null);
+  const [folderName, setFolderName] = useState("");
+  const [folderSortPosition, setFolderSortPosition] = useState("");
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
   const [priceUsdt, setPriceUsdt] = useState("");
   const [sortPosition, setSortPosition] = useState("");
+  const [botFolderId, setBotFolderId] = useState("");
   const [description, setDescription] = useState("");
   const [formatData, setFormatData] = useState("");
   const [priceTierRows, setPriceTierRows] = useState<PriceTierRow[]>([createTierRow()]);
   const [promoBuyQuantity, setPromoBuyQuantity] = useState("");
   const [promoBonusQuantity, setPromoBonusQuantity] = useState("");
+  const [editingFolder, setEditingFolder] = useState<BotFolder | null>(null);
+  const [editFolderName, setEditFolderName] = useState("");
+  const [editFolderSortPosition, setEditFolderSortPosition] = useState("");
+  const [deleteFolder, setDeleteFolder] = useState<BotFolder | null>(null);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [editName, setEditName] = useState("");
   const [editPrice, setEditPrice] = useState("");
   const [editPriceUsdt, setEditPriceUsdt] = useState("");
   const [editSortPosition, setEditSortPosition] = useState("");
+  const [editBotFolderId, setEditBotFolderId] = useState("");
   const [editDescription, setEditDescription] = useState("");
   const [editFormatData, setEditFormatData] = useState("");
   const [editPriceTierRows, setEditPriceTierRows] = useState<PriceTierRow[]>([createTierRow()]);
@@ -140,9 +180,27 @@ export default function ProductsPage() {
   const load = async () => {
     const { data, error } = await supabase
       .from("products")
-      .select("id, sort_position, name, price, price_usdt, price_tiers, promo_buy_quantity, promo_bonus_quantity, description, format_data, is_hidden, is_deleted")
+      .select("id, sort_position, bot_folder_id, name, price, price_usdt, price_tiers, promo_buy_quantity, promo_bonus_quantity, description, format_data, is_hidden, is_deleted")
       .order("id");
     if (error) {
+      const withFolderFallback = await supabase
+        .from("products")
+        .select("id, sort_position, name, price, price_usdt, price_tiers, promo_buy_quantity, promo_bonus_quantity, description, format_data, is_hidden, is_deleted")
+        .order("id");
+      if (!withFolderFallback.error) {
+        setProductError("Thiếu cột bot_folder_id trong products. Hãy chạy SQL migration folder sản phẩm mới.");
+        setProducts(
+          ((withFolderFallback.data as Product[]) || []).map((row) => ({
+            ...row,
+            sort_position: row.sort_position !== null && row.sort_position !== undefined ? Number(row.sort_position) : null,
+            bot_folder_id: null,
+            is_hidden: Boolean((row as any).is_hidden),
+            is_deleted: Boolean((row as any).is_deleted)
+          }))
+        );
+        return;
+      }
+
       const withHiddenFallback = await supabase
         .from("products")
         .select("id, name, price, price_usdt, price_tiers, promo_buy_quantity, promo_bonus_quantity, description, format_data, is_hidden, is_deleted")
@@ -153,6 +211,7 @@ export default function ProductsPage() {
           ((withHiddenFallback.data as Product[]) || []).map((row) => ({
             ...row,
             sort_position: null,
+            bot_folder_id: null,
             is_hidden: Boolean((row as any).is_hidden),
             is_deleted: Boolean((row as any).is_deleted)
           }))
@@ -173,6 +232,7 @@ export default function ProductsPage() {
         ((fallback.data as Product[]) || []).map((row) => ({
           ...row,
           sort_position: null,
+          bot_folder_id: null,
           is_hidden: false,
           is_deleted: false
         }))
@@ -184,9 +244,36 @@ export default function ProductsPage() {
       ((data as Product[]) || []).map((row) => ({
         ...row,
         sort_position: row.sort_position !== null && row.sort_position !== undefined ? Number(row.sort_position) : null,
+        bot_folder_id: row.bot_folder_id !== null && row.bot_folder_id !== undefined ? Number(row.bot_folder_id) : null,
         is_hidden: Boolean((row as any).is_hidden),
         is_deleted: Boolean((row as any).is_deleted)
       }))
+    );
+  };
+
+  const loadFolders = async () => {
+    const { data, error } = await supabase
+      .from("bot_product_folders")
+      .select("id, name, sort_position")
+      .order("id");
+    if (error) {
+      setFolderError(
+        error.message.includes("bot_product_folders")
+          ? "Thiếu bảng bot_product_folders. Hãy chạy SQL migration folder sản phẩm mới."
+          : error.message
+      );
+      setFolders([]);
+      return;
+    }
+
+    setFolderError(null);
+    setFolders(
+      sortFoldersByPosition(
+        ((data as BotFolder[]) || []).map((row) => ({
+          ...row,
+          sort_position: row.sort_position !== null && row.sort_position !== undefined ? Number(row.sort_position) : null
+        }))
+      )
     );
   };
 
@@ -204,6 +291,7 @@ export default function ProductsPage() {
 
   useEffect(() => {
     load();
+    loadFolders();
     loadFormats();
   }, []);
 
@@ -225,6 +313,21 @@ export default function ProductsPage() {
     if (productListTab === "deleted") return deletedProducts;
     return visibleProducts;
   }, [deletedProducts, hiddenProducts, productListTab, visibleProducts]);
+
+  const folderOptions = useMemo(() => sortFoldersByPosition(folders), [folders]);
+  const folderNameById = useMemo(() => {
+    const entries = folderOptions.map((folder) => [folder.id, folder.name] as const);
+    return new Map<number, string>(entries);
+  }, [folderOptions]);
+  const folderProductCounts = useMemo(() => {
+    const counts = new Map<number, number>();
+    for (const product of products) {
+      if (product.is_deleted) continue;
+      if (product.bot_folder_id === null || product.bot_folder_id === undefined) continue;
+      counts.set(product.bot_folder_id, (counts.get(product.bot_folder_id) || 0) + 1);
+    }
+    return counts;
+  }, [products]);
 
   const addTierRow = () => {
     setPriceTierRows((prev) => [...prev, createTierRow()]);
@@ -298,6 +401,96 @@ export default function ProductsPage() {
     }
   };
 
+  const shiftFoldersForInsert = async (position: number): Promise<PositionShiftRow[]> => {
+    const { data, error } = await supabase
+      .from("bot_product_folders")
+      .select("id, sort_position")
+      .gte("sort_position", position)
+      .order("sort_position", { ascending: false })
+      .order("id", { ascending: false });
+
+    if (error) {
+      throw error;
+    }
+
+    const rows = ((data as Array<{ id: number; sort_position: number | null }>) || [])
+      .filter((row) => row.sort_position !== null && row.sort_position !== undefined)
+      .map((row) => ({
+        id: Number(row.id),
+        sort_position: Number(row.sort_position)
+      }));
+
+    for (const row of rows) {
+      const { error: updateError } = await supabase
+        .from("bot_product_folders")
+        .update({ sort_position: row.sort_position + 1 })
+        .eq("id", row.id);
+
+      if (updateError) {
+        throw updateError;
+      }
+    }
+
+    return rows;
+  };
+
+  const restoreShiftedFolders = async (rows: PositionShiftRow[]) => {
+    for (const row of rows) {
+      await supabase
+        .from("bot_product_folders")
+        .update({ sort_position: row.sort_position })
+        .eq("id", row.id);
+    }
+  };
+
+  const handleAddFolder = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const nameValue = folderName.trim();
+    if (!nameValue) return;
+
+    const parsedSortPosition = parseSortPosition(folderSortPosition);
+    if (!parsedSortPosition.valid) {
+      setFolderError("Vị trí folder phải là số nguyên lớn hơn hoặc bằng 0 (hoặc để trống).");
+      return;
+    }
+
+    let shiftedRows: PositionShiftRow[] = [];
+    if (parsedSortPosition.value !== null) {
+      try {
+        shiftedRows = await shiftFoldersForInsert(parsedSortPosition.value);
+      } catch (error: any) {
+        setFolderError(
+          error?.message?.includes("bot_product_folders")
+            ? "Thiếu bảng bot_product_folders. Hãy chạy SQL migration folder sản phẩm mới."
+            : error?.message || "Không thể chèn vị trí folder."
+        );
+        return;
+      }
+    }
+
+    const { error } = await supabase.from("bot_product_folders").insert({
+      name: nameValue,
+      sort_position: parsedSortPosition.value
+    });
+
+    if (error) {
+      if (shiftedRows.length) {
+        await restoreShiftedFolders(shiftedRows);
+      }
+      setFolderError(
+        error.message.includes("bot_product_folders")
+          ? "Thiếu bảng bot_product_folders. Hãy chạy SQL migration folder sản phẩm mới."
+          : error.message
+      );
+      return;
+    }
+
+    setFolderError(null);
+    setFolderName("");
+    setFolderSortPosition("");
+    await loadFolders();
+  };
+
   const handleAdd = async (event: React.FormEvent) => {
     event.preventDefault();
     const tiers = normalizeTierRows(priceTierRows);
@@ -333,6 +526,7 @@ export default function ProductsPage() {
       price: parseInt(price || "0", 10),
       price_usdt: parseFloat(priceUsdt || "0"),
       sort_position: parsedSortPosition.value,
+      bot_folder_id: parseOptionalFolderId(botFolderId),
       description,
       format_data: formatData || null,
       price_tiers: tiers.length ? tiers : null,
@@ -346,6 +540,8 @@ export default function ProductsPage() {
       setProductError(
         error.message.includes("sort_position")
           ? "Thiếu cột sort_position trong products. Hãy chạy SQL migration position mới."
+          : error.message.includes("bot_folder_id")
+          ? "Thiếu cột bot_folder_id trong products. Hãy chạy SQL migration folder sản phẩm mới."
           : error.message
       );
       return;
@@ -355,6 +551,7 @@ export default function ProductsPage() {
     setPrice("");
     setPriceUsdt("");
     setSortPosition("");
+    setBotFolderId("");
     setDescription("");
     setFormatData("");
     setPriceTierRows([createTierRow()]);
@@ -428,6 +625,7 @@ export default function ProductsPage() {
     setEditPrice(product.price.toString());
     setEditPriceUsdt(product.price_usdt?.toString() ?? "");
     setEditSortPosition(product.sort_position !== null && product.sort_position !== undefined ? String(product.sort_position) : "");
+    setEditBotFolderId(product.bot_folder_id !== null && product.bot_folder_id !== undefined ? String(product.bot_folder_id) : "");
     setEditDescription(product.description ?? "");
     setEditFormatData(product.format_data ?? "");
     setEditPriceTierRows(parseTierRows(product.price_tiers));
@@ -441,11 +639,95 @@ export default function ProductsPage() {
     setEditPrice("");
     setEditPriceUsdt("");
     setEditSortPosition("");
+    setEditBotFolderId("");
     setEditDescription("");
     setEditFormatData("");
     setEditPriceTierRows([createTierRow()]);
     setEditPromoBuyQuantity("");
     setEditPromoBonusQuantity("");
+  };
+
+  const startEditFolder = (folder: BotFolder) => {
+    setEditingFolder(folder);
+    setEditFolderName(folder.name);
+    setEditFolderSortPosition(folder.sort_position !== null && folder.sort_position !== undefined ? String(folder.sort_position) : "");
+  };
+
+  const cancelEditFolder = () => {
+    setEditingFolder(null);
+    setEditFolderName("");
+    setEditFolderSortPosition("");
+  };
+
+  const handleUpdateFolder = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingFolder) return;
+
+    const nameValue = editFolderName.trim();
+    if (!nameValue) return;
+
+    const parsedSortPosition = parseSortPosition(editFolderSortPosition);
+    if (!parsedSortPosition.valid) {
+      setFolderError("Vị trí folder phải là số nguyên lớn hơn hoặc bằng 0 (hoặc để trống).");
+      return;
+    }
+
+    const { error } = await supabase
+      .from("bot_product_folders")
+      .update({
+        name: nameValue,
+        sort_position: parsedSortPosition.value
+      })
+      .eq("id", editingFolder.id);
+
+    if (error) {
+      setFolderError(
+        error.message.includes("bot_product_folders")
+          ? "Thiếu bảng bot_product_folders. Hãy chạy SQL migration folder sản phẩm mới."
+          : error.message
+      );
+      return;
+    }
+
+    setFolderError(null);
+    cancelEditFolder();
+    await loadFolders();
+  };
+
+  const handleDeleteFolderConfirm = async () => {
+    if (!deleteFolder) return;
+
+    const { error: unassignError } = await supabase
+      .from("products")
+      .update({ bot_folder_id: null })
+      .eq("bot_folder_id", deleteFolder.id);
+
+    if (unassignError) {
+      setFolderError(
+        unassignError.message.includes("bot_folder_id")
+          ? "Thiếu cột bot_folder_id trong products. Hãy chạy SQL migration folder sản phẩm mới."
+          : unassignError.message
+      );
+      return;
+    }
+
+    const { error } = await supabase
+      .from("bot_product_folders")
+      .delete()
+      .eq("id", deleteFolder.id);
+
+    if (error) {
+      setFolderError(
+        error.message.includes("bot_product_folders")
+          ? "Thiếu bảng bot_product_folders. Hãy chạy SQL migration folder sản phẩm mới."
+          : error.message
+      );
+      return;
+    }
+
+    setFolderError(null);
+    setDeleteFolder(null);
+    await Promise.all([loadFolders(), load()]);
   };
 
   const handleUpdate = async (event: React.FormEvent) => {
@@ -472,6 +754,7 @@ export default function ProductsPage() {
         price: parseInt(editPrice || "0", 10),
         price_usdt: parseFloat(editPriceUsdt || "0"),
         sort_position: parsedSortPosition.value,
+        bot_folder_id: parseOptionalFolderId(editBotFolderId),
         description: editDescription,
         format_data: editFormatData || null,
         price_tiers: tiers.length ? tiers : null,
@@ -483,6 +766,8 @@ export default function ProductsPage() {
       setProductError(
         error.message.includes("sort_position")
           ? "Thiếu cột sort_position trong products. Hãy chạy SQL migration position mới."
+          : error.message.includes("bot_folder_id")
+          ? "Thiếu cột bot_folder_id trong products. Hãy chạy SQL migration folder sản phẩm mới."
           : error.message
       );
       return;
@@ -566,12 +851,88 @@ export default function ProductsPage() {
       </div>
 
       <div className="card">
+        <h3 className="section-title">Folder sản phẩm Bot</h3>
+        <p className="muted" style={{ marginBottom: 12 }}>
+          Folder chỉ áp dụng cho Telegram Bot. Xóa folder sẽ không xóa sản phẩm, chỉ đưa sản phẩm về danh sách top-level.
+        </p>
+        <form className="form-grid" onSubmit={handleAddFolder}>
+          <input
+            className="input"
+            placeholder="Tên folder Bot"
+            value={folderName}
+            onChange={(e) => setFolderName(e.target.value)}
+            required
+          />
+          <input
+            className="input"
+            placeholder="Vị trí folder (VD: 1, 2, 3)"
+            value={folderSortPosition}
+            onChange={(e) => setFolderSortPosition(e.target.value)}
+          />
+          <button className="button" type="submit">Thêm folder</button>
+        </form>
+        {folderError && (
+          <p className="muted" style={{ marginTop: 8 }}>
+            Lỗi: {folderError}
+          </p>
+        )}
+        <table className="table" style={{ marginTop: 16 }}>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Vị trí</th>
+              <th>Tên folder</th>
+              <th>Số sản phẩm</th>
+              <th>Hành động</th>
+            </tr>
+          </thead>
+          <tbody>
+            {folderOptions.map((folder) => (
+              <tr key={folder.id}>
+                <td>#{folder.id}</td>
+                <td>{folder.sort_position ?? "-"}</td>
+                <td>{folder.name}</td>
+                <td>{folderProductCounts.get(folder.id) || 0}</td>
+                <td>
+                  <div className="product-row-actions">
+                    <button className="button secondary action-pill" type="button" onClick={() => startEditFolder(folder)}>
+                      Chỉnh sửa
+                    </button>
+                    <button className="button danger action-pill" type="button" onClick={() => setDeleteFolder(folder)}>
+                      Xóa folder
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {!folderOptions.length && (
+              <tr>
+                <td colSpan={5} className="muted">Chưa có folder nào.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="card">
         <h3 className="section-title">Thêm sản phẩm mới</h3>
         <form className="form-grid" onSubmit={handleAdd}>
           <input className="input" placeholder="Tên sản phẩm" value={name} onChange={(e) => setName(e.target.value)} required />
           <input className="input" placeholder="Giá (VND)" value={price} onChange={(e) => setPrice(e.target.value)} required />
           <input className="input" placeholder="Giá (USDT)" value={priceUsdt} onChange={(e) => setPriceUsdt(e.target.value)} />
           <input className="input" placeholder="Vị trí trên Bot (VD: 1, 2, 3)" value={sortPosition} onChange={(e) => setSortPosition(e.target.value)} />
+          <select
+            className="select"
+            value={botFolderId}
+            onChange={(e) => setBotFolderId(e.target.value)}
+          >
+            <option value="">Không gán folder Bot</option>
+            {folderOptions.map((folder) => (
+              <option key={folder.id} value={folder.id}>
+                {folder.name}
+              </option>
+            ))}
+          </select>
           <select
             className="select"
             value=""
@@ -678,6 +1039,7 @@ export default function ProductsPage() {
             <tr>
               <th>ID</th>
               <th>Vị trí</th>
+              <th>Folder Bot</th>
               <th>Tên</th>
               <th>Giá (VND)</th>
               <th>Giá (USDT)</th>
@@ -693,6 +1055,11 @@ export default function ProductsPage() {
               <tr key={product.id}>
                 <td>#{product.id}</td>
                 <td>{product.sort_position ?? "-"}</td>
+                <td>
+                  {product.bot_folder_id !== null
+                    ? folderNameById.get(product.bot_folder_id) ?? `#${product.bot_folder_id}`
+                    : "-"}
+                </td>
                 <td>{product.name}</td>
                 <td>{product.price.toLocaleString()}</td>
                 <td>{product.price_usdt?.toString() ?? "0"}</td>
@@ -738,7 +1105,7 @@ export default function ProductsPage() {
             ))}
             {!listedProducts.length && (
               <tr>
-                <td colSpan={10} className="muted">
+                <td colSpan={11} className="muted">
                   {productListTab === "hidden"
                     ? "Chưa có sản phẩm đang ẩn."
                     : productListTab === "deleted"
@@ -818,6 +1185,18 @@ export default function ProductsPage() {
               <input className="input" placeholder="Giá (VND)" value={editPrice} onChange={(e) => setEditPrice(e.target.value)} required />
               <input className="input" placeholder="Giá (USDT)" value={editPriceUsdt} onChange={(e) => setEditPriceUsdt(e.target.value)} />
               <input className="input" placeholder="Vị trí trên Bot (để trống nếu không dùng)" value={editSortPosition} onChange={(e) => setEditSortPosition(e.target.value)} />
+              <select
+                className="select"
+                value={editBotFolderId}
+                onChange={(e) => setEditBotFolderId(e.target.value)}
+              >
+                <option value="">Không gán folder Bot</option>
+                {folderOptions.map((folder) => (
+                  <option key={folder.id} value={folder.id}>
+                    {folder.name}
+                  </option>
+                ))}
+              </select>
               <textarea className="textarea form-section" placeholder="Mô tả (gửi trước Account sau thanh toán)" value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
               <select
                 className="select"
@@ -891,6 +1270,38 @@ export default function ProductsPage() {
         </div>
       )}
 
+      {editingFolder && (
+        <div className="modal-backdrop" onClick={cancelEditFolder}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <h3 className="section-title">Chỉnh sửa folder #{editingFolder.id}</h3>
+            <form className="form-grid" onSubmit={handleUpdateFolder}>
+              <input
+                className="input"
+                placeholder="Tên folder Bot"
+                value={editFolderName}
+                onChange={(e) => setEditFolderName(e.target.value)}
+                required
+              />
+              <input
+                className="input"
+                placeholder="Vị trí folder"
+                value={editFolderSortPosition}
+                onChange={(e) => setEditFolderSortPosition(e.target.value)}
+              />
+              {folderError && (
+                <p className="muted form-section" style={{ marginTop: 0 }}>
+                  Lỗi: {folderError}
+                </p>
+              )}
+              <div className="modal-actions">
+                <button className="button" type="submit">Lưu</button>
+                <button className="button secondary" type="button" onClick={cancelEditFolder}>Hủy</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {editingTemplate && (
         <div className="modal-backdrop" onClick={cancelEditTemplate}>
           <div className="modal" onClick={(event) => event.stopPropagation()}>
@@ -919,6 +1330,21 @@ export default function ProductsPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {deleteFolder && (
+        <div className="modal-backdrop" onClick={() => setDeleteFolder(null)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <h3 className="section-title">Xóa folder #{deleteFolder.id}</h3>
+            <p className="muted" style={{ marginTop: 8 }}>
+              Tất cả sản phẩm trong <strong>{deleteFolder.name}</strong> sẽ được bỏ gán folder và trở về top-level. Không có sản phẩm nào bị xóa. Bạn có chắc muốn tiếp tục?
+            </p>
+            <div className="modal-actions">
+              <button className="button danger" type="button" onClick={handleDeleteFolderConfirm}>Xóa folder</button>
+              <button className="button secondary" type="button" onClick={() => setDeleteFolder(null)}>Hủy</button>
+            </div>
           </div>
         </div>
       )}

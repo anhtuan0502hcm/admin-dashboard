@@ -5,6 +5,8 @@ import {
   LICENSE_RECHECK_INTERVAL_SECONDS,
   type LicenseActivationAdminStatus,
   type LicenseActivationRecord,
+  type LicenseKeyActivationSummary,
+  type LicenseKeyDeviceLimitMode,
   type LicenseExtensionRecord,
   type LicenseKeyAdminStatus,
   type LicenseKeyRecord,
@@ -30,6 +32,7 @@ type LicenseKeyRow = {
   status: "active" | "expired" | "revoked";
   expires_at: string;
   note: string | null;
+  device_limit_mode: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -81,6 +84,9 @@ export const normalizeOptionalText = (value: unknown, maxLength = 2000) => {
 };
 
 export const normalizeOptionalVersion = (value: unknown) => normalizeOptionalText(value, 120);
+
+export const normalizeLicenseKeyDeviceLimitMode = (value: unknown): LicenseKeyDeviceLimitMode =>
+  String(value || "").trim().toLowerCase() === "unlimited_devices" ? "unlimited_devices" : "single_device";
 
 export const hashSecret = (value: string) => createHash("sha256").update(value).digest("hex");
 
@@ -141,6 +147,16 @@ const normalizeRpcPayload = (payload: unknown): LicensePublicResponse => {
     nextCheckAfterSeconds: LICENSE_RECHECK_INTERVAL_SECONDS
   };
 };
+
+const mapActivationSummary = (
+  row: Pick<LicenseActivationRow, "id" | "fingerprint" | "activated_at" | "last_checked_at" | "last_version">
+): LicenseKeyActivationSummary => ({
+  id: row.id,
+  fingerprint: row.fingerprint,
+  activatedAt: row.activated_at,
+  lastCheckedAt: row.last_checked_at,
+  lastVersion: row.last_version
+});
 
 export const getRequestIp = (request: NextRequest) => {
   const forwardedFor = request.headers.get("x-forwarded-for") || "";
@@ -242,7 +258,7 @@ export async function listLicenseKeys(
 ): Promise<LicenseKeyRecord[]> {
   let query = supabase
     .from("license_keys")
-    .select("id, extension_id, key_prefix, key_suffix, status, expires_at, note, created_at, updated_at")
+    .select("id, extension_id, key_prefix, key_suffix, status, expires_at, note, device_limit_mode, created_at, updated_at")
     .order("created_at", { ascending: false })
     .range(0, 499);
 
@@ -275,6 +291,8 @@ export async function listLicenseKeys(
     .from("license_activations")
     .select("id, license_key_id, fingerprint, activated_at, last_checked_at, last_version")
     .in("license_key_id", keyIds)
+    .order("last_checked_at", { ascending: false })
+    .order("activated_at", { ascending: false })
     .is("deactivated_at", null);
 
   if (activationError) {
@@ -282,18 +300,22 @@ export async function listLicenseKeys(
   }
 
   const extensionById = mapExtensionsById((extensionData as LicenseExtensionRow[]) || []);
-  const activeActivationByKeyId = new Map<
-    number,
-    Pick<LicenseActivationRow, "id" | "license_key_id" | "fingerprint" | "activated_at" | "last_checked_at" | "last_version">
-  >(
-    ((((activationData as Array<
+  const activationRows =
+    (activationData as Array<
       Pick<LicenseActivationRow, "id" | "license_key_id" | "fingerprint" | "activated_at" | "last_checked_at" | "last_version">
-    >) || [])).map((row) => [row.license_key_id, row]))
-  );
+    >) || [];
+  const activeActivationsByKeyId = new Map<number, LicenseKeyActivationSummary[]>();
+
+  for (const activationRow of activationRows) {
+    const list = activeActivationsByKeyId.get(activationRow.license_key_id) || [];
+    list.push(mapActivationSummary(activationRow));
+    activeActivationsByKeyId.set(activationRow.license_key_id, list);
+  }
 
   const mapped = keyRows.map((row) => {
     const extension = extensionById.get(row.extension_id);
-    const activeActivation = activeActivationByKeyId.get(row.id);
+    const activeActivations = activeActivationsByKeyId.get(row.id) || [];
+    const activeActivation = activeActivations[0] || null;
 
     return {
       id: row.id,
@@ -309,15 +331,10 @@ export async function listLicenseKeys(
       note: row.note,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-      activeActivation: activeActivation
-        ? {
-            id: activeActivation.id,
-            fingerprint: activeActivation.fingerprint,
-            activatedAt: activeActivation.activated_at,
-            lastCheckedAt: activeActivation.last_checked_at,
-            lastVersion: activeActivation.last_version
-          }
-        : null
+      deviceLimitMode: normalizeLicenseKeyDeviceLimitMode(row.device_limit_mode),
+      activeActivationCount: activeActivations.length,
+      activeActivations,
+      activeActivation
     } satisfies LicenseKeyRecord;
   });
 
