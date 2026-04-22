@@ -66,6 +66,17 @@ type SanitizedErrorLog = {
   hint?: string;
 };
 
+type LicenseRuntimeExtensionRow = Pick<LicenseExtensionRow, "id" | "is_active">;
+type LicenseRuntimeKeyRow = Pick<LicenseKeyRow, "id" | "status" | "expires_at" | "device_limit_mode">;
+type LicenseRuntimeActivationRow = Pick<LicenseActivationRow, "id" | "fingerprint">;
+
+class LicenseRuntimeMigrationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LicenseRuntimeMigrationError";
+  }
+}
+
 const LICENSE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const toTrimmedString = (value: unknown) => String(value || "").trim();
 
@@ -198,6 +209,13 @@ export const sanitizeErrorForLog = (error: unknown): SanitizedErrorLog => {
   };
 };
 
+const buildPublicResponse = (status: LicensePublicStatus, expiresAt: string | null): LicensePublicResponse => ({
+  valid: status === "active",
+  status,
+  expiresAt,
+  nextCheckAfterSeconds: LICENSE_RECHECK_INTERVAL_SECONDS
+});
+
 export const logLicenseServiceError = (scope: string, error: unknown) => {
   console.error(`[${scope}] License service error`, sanitizeErrorForLog(error));
 };
@@ -207,6 +225,217 @@ export const getLicenseServiceUnavailableBody = () => ({
   code: "license_service_unavailable",
   error: "Dịch vụ license tạm thời không khả dụng. Vui lòng thử lại sau."
 });
+
+const isUniqueViolationError = (error: unknown) => {
+  const code = getErrorField(error, "code");
+  const message = getErrorField(error, "message") || "";
+  return code === "23505" || message.toLowerCase().includes("duplicate key");
+};
+
+const isOldSingleDeviceIndexError = (error: unknown) => {
+  const haystack = [
+    getErrorField(error, "message"),
+    getErrorField(error, "details"),
+    getErrorField(error, "hint")
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes("idx_license_activations_active_key");
+};
+
+const recordLicenseCheck = async (
+  supabase: SupabaseClient,
+  params: {
+    licenseKeyId: number | null;
+    extensionCode: string;
+    fingerprint: string;
+    requestType: "activate" | "validate";
+    resultStatus: LicensePublicStatus;
+    ip: string | null;
+    userAgent: string | null;
+  }
+) => {
+  const { error } = await supabase.from("license_check_logs").insert({
+    license_key_id: params.licenseKeyId,
+    extension_code: params.extensionCode || "UNKNOWN",
+    fingerprint: normalizeFingerprint(params.fingerprint) || null,
+    request_type: params.requestType,
+    result_status: params.resultStatus,
+    ip: normalizeOptionalText(params.ip, 200),
+    user_agent: normalizeOptionalText(params.userAgent, 512)
+  });
+
+  if (error) {
+    logLicenseServiceError("licenses.log", error);
+  }
+};
+
+const buildActivationMutation = (params: {
+  activationTokenHash: string;
+  ip: string | null;
+  userAgent: string | null;
+  version: string | null;
+}) => ({
+  activation_token_hash: params.activationTokenHash,
+  last_checked_at: new Date().toISOString(),
+  last_ip: normalizeOptionalText(params.ip, 200),
+  last_user_agent: normalizeOptionalText(params.userAgent, 512),
+  last_version: normalizeOptionalVersion(params.version)
+});
+
+async function activateUnlimitedLicenseFallback(
+  supabase: SupabaseClient,
+  params: {
+    extensionCode: string;
+    keyHash: string;
+    fingerprint: string;
+    activationTokenHash: string;
+    ip: string | null;
+    userAgent: string | null;
+    version: string | null;
+  },
+  previousResponse: LicensePublicResponse
+): Promise<LicensePublicResponse> {
+  const { data: extensionRow, error: extensionError } = await supabase
+    .from("license_extensions")
+    .select("id, is_active")
+    .eq("code", params.extensionCode)
+    .maybeSingle();
+
+  if (extensionError) {
+    throw extensionError;
+  }
+
+  const extension = extensionRow as LicenseRuntimeExtensionRow | null;
+  if (!extension || !extension.is_active) {
+    return previousResponse;
+  }
+
+  const { data: keyRow, error: keyError } = await supabase
+    .from("license_keys")
+    .select("id, status, expires_at, device_limit_mode")
+    .eq("extension_id", extension.id)
+    .eq("key_hash", params.keyHash)
+    .maybeSingle();
+
+  if (keyError) {
+    throw keyError;
+  }
+
+  const licenseKey = keyRow as LicenseRuntimeKeyRow | null;
+  if (!licenseKey || normalizeLicenseKeyDeviceLimitMode(licenseKey.device_limit_mode) !== "unlimited_devices") {
+    return previousResponse;
+  }
+
+  const effectiveStatus = getEffectiveKeyStatus(licenseKey.status, licenseKey.expires_at);
+  if (effectiveStatus !== "active") {
+    await recordLicenseCheck(supabase, {
+      licenseKeyId: licenseKey.id,
+      extensionCode: params.extensionCode,
+      fingerprint: params.fingerprint,
+      requestType: "activate",
+      resultStatus: effectiveStatus,
+      ip: params.ip,
+      userAgent: params.userAgent
+    });
+    return buildPublicResponse(effectiveStatus, licenseKey.expires_at);
+  }
+
+  const activationPatch = buildActivationMutation(params);
+  const { data: existingActivation, error: existingError } = await supabase
+    .from("license_activations")
+    .select("id, fingerprint")
+    .eq("license_key_id", licenseKey.id)
+    .eq("fingerprint", params.fingerprint)
+    .is("deactivated_at", null)
+    .order("activated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (existingError) {
+    throw existingError;
+  }
+
+  const activeActivation = existingActivation as LicenseRuntimeActivationRow | null;
+  if (activeActivation?.id) {
+    const { error: updateError } = await supabase
+      .from("license_activations")
+      .update(activationPatch)
+      .eq("id", activeActivation.id);
+
+    if (updateError) {
+      throw updateError;
+    }
+
+    await recordLicenseCheck(supabase, {
+      licenseKeyId: licenseKey.id,
+      extensionCode: params.extensionCode,
+      fingerprint: params.fingerprint,
+      requestType: "activate",
+      resultStatus: "active",
+      ip: params.ip,
+      userAgent: params.userAgent
+    });
+    return buildPublicResponse("active", licenseKey.expires_at);
+  }
+
+  const { error: insertError } = await supabase.from("license_activations").insert({
+    license_key_id: licenseKey.id,
+    fingerprint: params.fingerprint,
+    ...activationPatch
+  });
+
+  if (insertError) {
+    if (isUniqueViolationError(insertError)) {
+      if (isOldSingleDeviceIndexError(insertError)) {
+        throw new LicenseRuntimeMigrationError(
+          "License unlimited-device mode is blocked by the old single-device database index. Apply supabase_schema_license_multi_device_keys.sql."
+        );
+      }
+
+      const { data: racedActivation, error: racedError } = await supabase
+        .from("license_activations")
+        .select("id, fingerprint")
+        .eq("license_key_id", licenseKey.id)
+        .eq("fingerprint", params.fingerprint)
+        .is("deactivated_at", null)
+        .order("activated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (racedError) {
+        throw racedError;
+      }
+
+      const racedActiveActivation = racedActivation as LicenseRuntimeActivationRow | null;
+      if (racedActiveActivation?.id) {
+        const { error: updateRacedError } = await supabase
+          .from("license_activations")
+          .update(activationPatch)
+          .eq("id", racedActiveActivation.id);
+
+        if (updateRacedError) {
+          throw updateRacedError;
+        }
+        return buildPublicResponse("active", licenseKey.expires_at);
+      }
+    }
+
+    throw insertError;
+  }
+
+  await recordLicenseCheck(supabase, {
+    licenseKeyId: licenseKey.id,
+    extensionCode: params.extensionCode,
+    fingerprint: params.fingerprint,
+    requestType: "activate",
+    resultStatus: "active",
+    ip: params.ip,
+    userAgent: params.userAgent
+  });
+  return buildPublicResponse("active", licenseKey.expires_at);
+}
 
 const mapExtensionsById = (rows: LicenseExtensionRow[]) =>
   new Map(rows.map((row) => [row.id, row]));
@@ -498,10 +727,12 @@ export async function runActivateLicenseRpc(
     version: string | null;
   }
 ): Promise<LicensePublicResponse> {
+  const keyHash = hashSecret(params.licenseKey);
+  const activationTokenHash = hashSecret(params.activationToken);
   const { data, error } = await supabase.rpc("activate_license_key", {
     p_extension_code: params.extensionCode,
-    p_key_hash: hashSecret(params.licenseKey),
-    p_activation_token_hash: hashSecret(params.activationToken),
+    p_key_hash: keyHash,
+    p_activation_token_hash: activationTokenHash,
     p_fingerprint: params.fingerprint,
     p_ip: params.ip,
     p_user_agent: params.userAgent,
@@ -512,7 +743,24 @@ export async function runActivateLicenseRpc(
     throw error;
   }
 
-  return normalizeRpcPayload(data);
+  const response = normalizeRpcPayload(data);
+  if (response.status !== "fingerprint_mismatch") {
+    return response;
+  }
+
+  return activateUnlimitedLicenseFallback(
+    supabase,
+    {
+      extensionCode: params.extensionCode,
+      keyHash,
+      fingerprint: params.fingerprint,
+      activationTokenHash,
+      ip: params.ip,
+      userAgent: params.userAgent,
+      version: params.version
+    },
+    response
+  );
 }
 
 export async function runValidateLicenseRpc(
