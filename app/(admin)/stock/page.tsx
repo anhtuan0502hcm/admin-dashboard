@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { adminApiRequest } from "@/lib/adminOpsClient";
+import { ConfirmDialog, RowActionMenu } from "@/components/AdminUi";
 
 interface Product {
   id: number;
@@ -51,6 +52,12 @@ interface CustomCheckHistoryOverrides {
   senderFilter?: string;
   subjectFilter?: string;
   concurrency?: number;
+}
+
+interface PendingCustomDelete {
+  productId: string;
+  status: CustomCheckStatus;
+  targetIds: number[];
 }
 
 const CUSTOM_CHECK_HISTORY_KEY = "stock_custom_check_form_history_v1";
@@ -103,6 +110,7 @@ export default function StockPage() {
   const [customDeleteStatus, setCustomDeleteStatus] = useState<CustomCheckStatus>("error");
   const [customDeleteBusy, setCustomDeleteBusy] = useState(false);
   const [customDeleteMessage, setCustomDeleteMessage] = useState<string | null>(null);
+  const [pendingCustomDelete, setPendingCustomDelete] = useState<PendingCustomDelete | null>(null);
   const [customSourceHistory, setCustomSourceHistory] = useState<CustomCheckSource[]>([]);
   const [customMailColumnHistory, setCustomMailColumnHistory] = useState<number[]>([]);
   const [customSenderHistory, setCustomSenderHistory] = useState<string[]>([]);
@@ -751,14 +759,16 @@ export default function StockPage() {
       return;
     }
 
-    if (
-      !confirm(
-        `Xóa ${targetIds.length.toLocaleString("vi-VN")} stock thuộc nhóm ${customDeleteStatusLabels[customDeleteStatus]}?`
-      )
-    ) {
-      return;
-    }
+    setPendingCustomDelete({
+      productId: selectedProductId,
+      status: customDeleteStatus,
+      targetIds
+    });
+  };
 
+  const executePendingCustomDelete = async () => {
+    if (!pendingCustomDelete) return;
+    const { productId, status, targetIds } = pendingCustomDelete;
     setCustomDeleteBusy(true);
     setCustomDeleteMessage(null);
     try {
@@ -781,17 +791,18 @@ export default function StockPage() {
 
       setCustomCheckResults((prev) => prev.filter((item) => !targetIds.includes(item.stock_id)));
       setCustomDeleteMessage(
-        `Đã xóa ${targetIds.length.toLocaleString("vi-VN")} stock nhóm ${customDeleteStatusLabels[customDeleteStatus]}.`
+        `Đã xóa ${targetIds.length.toLocaleString("vi-VN")} stock nhóm ${customDeleteStatusLabels[status]}.`
       );
 
-      await loadStockSummary(selectedProductId);
-      await loadStock(selectedProductId, page);
+      await loadStockSummary(productId);
+      await loadStock(productId, page);
     } catch (error) {
       setCustomDeleteMessage(
         error instanceof Error ? error.message : "Không thể xóa stock theo nhóm kết quả."
       );
     } finally {
       setCustomDeleteBusy(false);
+      setPendingCustomDelete(null);
     }
   };
 
@@ -1295,15 +1306,11 @@ export default function StockPage() {
                   </div>
                 </td>
                 <td>{item.sold ? "Đã bán" : "Còn"}</td>
-                <td>
-                  <div className="table-actions">
-                    <button type="button" className="button secondary" onClick={() => startEdit(item)}>
-                      Chỉnh sửa
-                    </button>
-                    <button type="button" className="button danger" onClick={() => setDeleteStock(item)}>
-                      Xóa
-                    </button>
-                  </div>
+                <td className="row-actions-cell">
+                  <RowActionMenu items={[
+                    { label: "Chỉnh sửa", onSelect: () => startEdit(item) },
+                    { label: "Xóa", tone: "danger", onSelect: () => setDeleteStock(item) }
+                  ]} />
                 </td>
               </tr>
             ))}
@@ -1462,6 +1469,23 @@ export default function StockPage() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={Boolean(pendingCustomDelete)}
+        title="Xóa stock theo kết quả custom check?"
+        description={
+          pendingCustomDelete ? (
+            <>
+              Xóa {pendingCustomDelete.targetIds.length.toLocaleString("vi-VN")} stock thuộc nhóm{" "}
+              <strong>{customDeleteStatusLabels[pendingCustomDelete.status]}</strong>. Thao tác này không thể hoàn tác.
+            </>
+          ) : null
+        }
+        confirmLabel="Xóa stock"
+        busy={customDeleteBusy}
+        onConfirm={executePendingCustomDelete}
+        onCancel={() => setPendingCustomDelete(null)}
+      />
     </div>
   );
 }

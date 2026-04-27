@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { adminApiRequest } from "@/lib/adminOpsClient";
+import { ConfirmDialog, RowActionMenu } from "@/components/AdminUi";
 
 interface DirectOrderRow {
   id: number;
@@ -36,11 +37,17 @@ const STATUS_LABELS: Record<string, string> = {
   cancelled: "Đã hủy"
 };
 
+type PendingDirectOrderAction =
+  | { type: "approve"; order: DirectOrderRow }
+  | { type: "failed"; order: DirectOrderRow }
+  | null;
+
 export default function DirectOrdersPage() {
   const [orders, setOrders] = useState<DirectOrderRow[]>([]);
   const [statusFilter, setStatusFilter] = useState("pending");
   const [sendingId, setSendingId] = useState<number | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<PendingDirectOrderAction>(null);
 
   const load = async () => {
     let query = supabase
@@ -79,7 +86,6 @@ export default function DirectOrdersPage() {
       setStatus("Đơn Binance on-chain được xác nhận tự động. Không duyệt tay tại đây.");
       return;
     }
-    if (!confirm(`Duyệt đơn #${order.id} và đưa vào hàng chờ giao tự động cho user ${order.user_id}?`)) return;
     const { data } = await supabase.auth.getSession();
     const token = data.session?.access_token;
     if (!token) {
@@ -122,7 +128,7 @@ export default function DirectOrdersPage() {
   };
 
   const handleMarkFailed = async (order: DirectOrderRow) => {
-    if (!confirm(`Đánh dấu thất bại đơn #${order.id}?`)) return;
+    setSendingId(order.id);
     try {
       await adminApiRequest("/api/direct-orders/status", {
         method: "POST",
@@ -135,8 +141,21 @@ export default function DirectOrdersPage() {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Không thể cập nhật đơn.");
       return;
+    } finally {
+      setSendingId(null);
     }
     await load();
+  };
+
+  const confirmPendingAction = async () => {
+    if (!pendingAction) return;
+    const action = pendingAction;
+    if (action.type === "approve") {
+      await handleApprove(action.order);
+    } else {
+      await handleMarkFailed(action.order);
+    }
+    setPendingAction(null);
   };
 
   return (
@@ -208,28 +227,26 @@ export default function DirectOrdersPage() {
                 <td>{order.code}</td>
                 <td>{STATUS_LABELS[order.status] ?? order.status}</td>
                 <td>{order.created_at ? new Date(order.created_at).toLocaleString() : "-"}</td>
-                <td>
-                  {order.status === "pending" ? (
-                    <>
-                      <button
-                        className="button secondary"
-                        disabled={sendingId === order.id || order.payment_channel === "binance_onchain"}
-                        onClick={() => handleApprove(order)}
-                      >
-                        {order.payment_channel === "binance_onchain" ? "Tự động" : "Duyệt"}
-                      </button>
-                      <button
-                        className="button danger"
-                        style={{ marginLeft: 8 }}
-                        disabled={sendingId === order.id}
-                        onClick={() => handleMarkFailed(order)}
-                      >
-                        Thất bại
-                      </button>
-                    </>
-                  ) : (
-                    <span className="muted">-</span>
-                  )}
+                <td className="row-actions-cell">
+                  <RowActionMenu
+                    items={
+                      order.status === "pending"
+                        ? [
+                            {
+                              label: order.payment_channel === "binance_onchain" ? "Tự động" : "Duyệt",
+                              disabled: sendingId === order.id || order.payment_channel === "binance_onchain",
+                              onSelect: () => setPendingAction({ type: "approve", order })
+                            },
+                            {
+                              label: "Thất bại",
+                              tone: "danger",
+                              disabled: sendingId === order.id,
+                              onSelect: () => setPendingAction({ type: "failed", order })
+                            }
+                          ]
+                        : []
+                    }
+                  />
                 </td>
               </tr>
             ))}
@@ -241,6 +258,27 @@ export default function DirectOrdersPage() {
           </tbody>
         </table>
       </div>
+
+      <ConfirmDialog
+        open={Boolean(pendingAction)}
+        title={pendingAction?.type === "approve" ? "Duyệt direct order?" : "Đánh dấu đơn thất bại?"}
+        description={
+          pendingAction ? (
+            <>
+              Đơn #{pendingAction.order.id} của user {pendingAction.order.user_id}, mã{" "}
+              <strong>{pendingAction.order.code}</strong>.
+              {pendingAction.type === "approve"
+                ? " Hệ thống sẽ tạo đơn giao tự động sau khi duyệt."
+                : " Trạng thái đơn sẽ chuyển sang thất bại."}
+            </>
+          ) : null
+        }
+        confirmLabel={pendingAction?.type === "approve" ? "Duyệt đơn" : "Đánh dấu thất bại"}
+        tone={pendingAction?.type === "approve" ? "primary" : "danger"}
+        busy={Boolean(pendingAction && sendingId === pendingAction.order.id)}
+        onConfirm={confirmPendingAction}
+        onCancel={() => setPendingAction(null)}
+      />
     </div>
   );
 }

@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { supabase } from "@/lib/supabaseClient";
 import { adminApiRequest } from "@/lib/adminOpsClient";
 import { useAdminSession } from "@/components/AdminSessionContext";
+import { RowActionMenu } from "@/components/AdminUi";
 
 interface PriceTier {
   min_quantity: number;
@@ -147,13 +149,10 @@ const formatTierSummary = (tiers: PriceTier[] | null | undefined) => {
     .join(" | ");
 };
 
-type PositionShiftRow = {
-  id: number;
-  sort_position: number;
-};
-
 export default function ProductsPage() {
   const adminSession = useAdminSession();
+  const renderModal = (content: JSX.Element) =>
+    typeof document === "undefined" ? null : createPortal(content, document.body);
   const [products, setProducts] = useState<Product[]>([]);
   const [folders, setFolders] = useState<BotFolder[]>([]);
   const [productListTab, setProductListTab] = useState<ProductListTab>("visible");
@@ -199,6 +198,8 @@ export default function ProductsPage() {
   const [templatePattern, setTemplatePattern] = useState("");
   const [templateError, setTemplateError] = useState<string | null>(null);
   const [templateSaving, setTemplateSaving] = useState(false);
+  const [productSaving, setProductSaving] = useState(false);
+  const [folderSaving, setFolderSaving] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<FormatTemplate | null>(null);
   const [editTemplateName, setEditTemplateName] = useState("");
   const [editTemplatePattern, setEditTemplatePattern] = useState("");
@@ -413,90 +414,6 @@ export default function ProductsPage() {
     setEditPriceTierRows((prev) => prev.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
   };
 
-  const shiftProductsForInsert = async (position: number): Promise<PositionShiftRow[]> => {
-    const { data, error } = await supabase
-      .from("products")
-      .select("id, sort_position")
-      .gte("sort_position", position)
-      .order("sort_position", { ascending: false })
-      .order("id", { ascending: false });
-
-    if (error) {
-      throw error;
-    }
-
-    const rows = ((data as Array<{ id: number; sort_position: number | null }>) || [])
-      .filter((row) => row.sort_position !== null && row.sort_position !== undefined)
-      .map((row) => ({
-        id: Number(row.id),
-        sort_position: Number(row.sort_position)
-      }));
-
-    for (const row of rows) {
-      const { error: updateError } = await supabase
-        .from("products")
-        .update({ sort_position: row.sort_position + 1 })
-        .eq("id", row.id);
-
-      if (updateError) {
-        throw updateError;
-      }
-    }
-
-    return rows;
-  };
-
-  const restoreShiftedProducts = async (rows: PositionShiftRow[]) => {
-    for (const row of rows) {
-      await supabase
-        .from("products")
-        .update({ sort_position: row.sort_position })
-        .eq("id", row.id);
-    }
-  };
-
-  const shiftFoldersForInsert = async (position: number): Promise<PositionShiftRow[]> => {
-    const { data, error } = await supabase
-      .from("bot_product_folders")
-      .select("id, sort_position")
-      .gte("sort_position", position)
-      .order("sort_position", { ascending: false })
-      .order("id", { ascending: false });
-
-    if (error) {
-      throw error;
-    }
-
-    const rows = ((data as Array<{ id: number; sort_position: number | null }>) || [])
-      .filter((row) => row.sort_position !== null && row.sort_position !== undefined)
-      .map((row) => ({
-        id: Number(row.id),
-        sort_position: Number(row.sort_position)
-      }));
-
-    for (const row of rows) {
-      const { error: updateError } = await supabase
-        .from("bot_product_folders")
-        .update({ sort_position: row.sort_position + 1 })
-        .eq("id", row.id);
-
-      if (updateError) {
-        throw updateError;
-      }
-    }
-
-    return rows;
-  };
-
-  const restoreShiftedFolders = async (rows: PositionShiftRow[]) => {
-    for (const row of rows) {
-      await supabase
-        .from("bot_product_folders")
-        .update({ sort_position: row.sort_position })
-        .eq("id", row.id);
-    }
-  };
-
   const handleAddFolder = async (event: React.FormEvent) => {
     event.preventDefault();
     const nameValue = folderName.trim();
@@ -508,35 +425,27 @@ export default function ProductsPage() {
       return;
     }
 
-    let shiftedRows: PositionShiftRow[] = [];
-    if (parsedSortPosition.value !== null) {
-      try {
-        shiftedRows = await shiftFoldersForInsert(parsedSortPosition.value);
-      } catch (error: any) {
-        setFolderError(
-          error?.message?.includes("bot_product_folders")
-            ? "Thiếu bảng bot_product_folders. Hãy chạy SQL migration folder sản phẩm mới."
-            : error?.message || "Không thể chèn vị trí folder."
-        );
-        return;
-      }
-    }
-
-    const { error } = await supabase.from("bot_product_folders").insert({
-      name: nameValue,
-      sort_position: parsedSortPosition.value
-    });
-
-    if (error) {
-      if (shiftedRows.length) {
-        await restoreShiftedFolders(shiftedRows);
-      }
+    setFolderSaving(true);
+    try {
+      await adminApiRequest("/api/admin/products", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "create_folder",
+          name: nameValue,
+          sortPosition: parsedSortPosition.value
+        })
+      });
+    } catch (error) {
       setFolderError(
-        error.message.includes("bot_product_folders")
+        error instanceof Error && error.message.includes("bot_product_folders")
           ? "Thiếu bảng bot_product_folders. Hãy chạy SQL migration folder sản phẩm mới."
-          : error.message
+          : error instanceof Error
+          ? error.message
+          : "Không thể thêm folder."
       );
       return;
+    } finally {
+      setFolderSaving(false);
     }
 
     setFolderError(null);
@@ -561,48 +470,41 @@ export default function ProductsPage() {
       return;
     }
 
-    let shiftedRows: PositionShiftRow[] = [];
-    if (parsedSortPosition.value !== null) {
-      try {
-        shiftedRows = await shiftProductsForInsert(parsedSortPosition.value);
-      } catch (error: any) {
-        setProductError(
-          error?.message?.includes("sort_position")
-            ? "Thiếu cột sort_position trong products. Hãy chạy SQL migration position mới."
-            : error?.message || "Không thể chèn vị trí sản phẩm."
-        );
-        return;
-      }
-    }
-
-    const { error } = await supabase.from("products").insert({
-      name,
-      price: parseInt(price || "0", 10),
-      price_usdt: parseFloat(priceUsdt || "0"),
-      sort_position: parsedSortPosition.value,
-      bot_folder_id: parseOptionalFolderId(botFolderId),
-      telegram_icon: normalizeTelegramIcon(telegramIcon),
-      telegram_icon_custom_emoji_id: normalizeTelegramCustomEmojiId(telegramIconCustomEmojiId),
-      description,
-      format_data: formatData || null,
-      price_tiers: tiers.length ? tiers : null,
-      promo_buy_quantity: hasPromo ? Math.trunc(buyQty) : 0,
-      promo_bonus_quantity: hasPromo ? Math.trunc(bonusQty) : 0
-    });
-    if (error) {
-      if (shiftedRows.length) {
-        await restoreShiftedProducts(shiftedRows);
-      }
+    setProductSaving(true);
+    try {
+      await adminApiRequest("/api/admin/products", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "create_product",
+          name,
+          price: parseInt(price || "0", 10),
+          priceUsdt: parseFloat(priceUsdt || "0"),
+          sortPosition: parsedSortPosition.value,
+          botFolderId: parseOptionalFolderId(botFolderId),
+          telegramIcon: normalizeTelegramIcon(telegramIcon),
+          telegramIconCustomEmojiId: normalizeTelegramCustomEmojiId(telegramIconCustomEmojiId),
+          description,
+          formatData: formatData || null,
+          priceTiers: tiers.length ? tiers : null,
+          promoBuyQuantity: hasPromo ? Math.trunc(buyQty) : 0,
+          promoBonusQuantity: hasPromo ? Math.trunc(bonusQty) : 0
+        })
+      });
+    } catch (error) {
       setProductError(
-        error.message.includes("sort_position")
+        error instanceof Error && error.message.includes("sort_position")
           ? "Thiếu cột sort_position trong products. Hãy chạy SQL migration position mới."
-          : error.message.includes("bot_folder_id")
+          : error instanceof Error && error.message.includes("bot_folder_id")
           ? "Thiếu cột bot_folder_id trong products. Hãy chạy SQL migration folder sản phẩm mới."
-          : error.message.includes("telegram_icon")
+          : error instanceof Error && error.message.includes("telegram_icon")
           ? "Thiếu cột Icon Telegram trong products. Hãy chạy lại supabase_schema_all_in_one.sql."
-          : error.message
+          : error instanceof Error
+          ? error.message
+          : "Không thể thêm sản phẩm."
       );
       return;
+    } finally {
+      setProductSaving(false);
     }
     setProductError(null);
     setName("");
@@ -748,21 +650,28 @@ export default function ProductsPage() {
       return;
     }
 
-    const { error } = await supabase
-      .from("bot_product_folders")
-      .update({
-        name: nameValue,
-        sort_position: parsedSortPosition.value
-      })
-      .eq("id", editingFolder.id);
-
-    if (error) {
+    setFolderSaving(true);
+    try {
+      await adminApiRequest("/api/admin/products", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "update_folder",
+          folderId: editingFolder.id,
+          name: nameValue,
+          sortPosition: parsedSortPosition.value
+        })
+      });
+    } catch (error) {
       setFolderError(
-        error.message.includes("bot_product_folders")
+        error instanceof Error && error.message.includes("bot_product_folders")
           ? "Thiếu bảng bot_product_folders. Hãy chạy SQL migration folder sản phẩm mới."
-          : error.message
+          : error instanceof Error
+          ? error.message
+          : "Không thể cập nhật folder."
       );
       return;
+    } finally {
+      setFolderSaving(false);
     }
 
     setFolderError(null);
@@ -816,34 +725,42 @@ export default function ProductsPage() {
       return;
     }
 
-    const { error } = await supabase
-      .from("products")
-      .update({
-        name: editName,
-        price: parseInt(editPrice || "0", 10),
-        price_usdt: parseFloat(editPriceUsdt || "0"),
-        sort_position: parsedSortPosition.value,
-        bot_folder_id: parseOptionalFolderId(editBotFolderId),
-        telegram_icon: normalizeTelegramIcon(editTelegramIcon),
-        telegram_icon_custom_emoji_id: normalizeTelegramCustomEmojiId(editTelegramIconCustomEmojiId),
-        description: editDescription,
-        format_data: editFormatData || null,
-        price_tiers: tiers.length ? tiers : null,
-        promo_buy_quantity: hasPromo ? Math.trunc(buyQty) : 0,
-        promo_bonus_quantity: hasPromo ? Math.trunc(bonusQty) : 0
-      })
-      .eq("id", editingProduct.id);
-    if (error) {
+    setProductSaving(true);
+    try {
+      await adminApiRequest("/api/admin/products", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "update_product",
+          productId: editingProduct.id,
+          name: editName,
+          price: parseInt(editPrice || "0", 10),
+          priceUsdt: parseFloat(editPriceUsdt || "0"),
+          sortPosition: parsedSortPosition.value,
+          botFolderId: parseOptionalFolderId(editBotFolderId),
+          telegramIcon: normalizeTelegramIcon(editTelegramIcon),
+          telegramIconCustomEmojiId: normalizeTelegramCustomEmojiId(editTelegramIconCustomEmojiId),
+          description: editDescription,
+          formatData: editFormatData || null,
+          priceTiers: tiers.length ? tiers : null,
+          promoBuyQuantity: hasPromo ? Math.trunc(buyQty) : 0,
+          promoBonusQuantity: hasPromo ? Math.trunc(bonusQty) : 0
+        })
+      });
+    } catch (error) {
       setProductError(
-        error.message.includes("sort_position")
+        error instanceof Error && error.message.includes("sort_position")
           ? "Thiếu cột sort_position trong products. Hãy chạy SQL migration position mới."
-          : error.message.includes("bot_folder_id")
+          : error instanceof Error && error.message.includes("bot_folder_id")
           ? "Thiếu cột bot_folder_id trong products. Hãy chạy SQL migration folder sản phẩm mới."
-          : error.message.includes("telegram_icon")
+          : error instanceof Error && error.message.includes("telegram_icon")
           ? "Thiếu cột Icon Telegram trong products. Hãy chạy lại supabase_schema_all_in_one.sql."
-          : error.message
+          : error instanceof Error
+          ? error.message
+          : "Không thể cập nhật sản phẩm."
       );
       return;
+    } finally {
+      setProductSaving(false);
     }
     setProductError(null);
     cancelEdit();
@@ -857,14 +774,20 @@ export default function ProductsPage() {
     if (!nameValue || !patternValue) return;
     setTemplateError(null);
     setTemplateSaving(true);
-    const { error } = await supabase.from("format_templates").insert({
-      name: nameValue,
-      pattern: patternValue
-    });
-    setTemplateSaving(false);
-    if (error) {
-      setTemplateError(error.message);
+    try {
+      await adminApiRequest("/api/admin/products", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "create_format_template",
+          name: nameValue,
+          pattern: patternValue
+        })
+      });
+    } catch (error) {
+      setTemplateError(error instanceof Error ? error.message : "Không thể thêm format template.");
       return;
+    } finally {
+      setTemplateSaving(false);
     }
     setTemplateName("");
     setTemplatePattern("");
@@ -874,10 +797,20 @@ export default function ProductsPage() {
 
   const handleDeleteTemplate = async (templateId: number) => {
     setTemplateError(null);
-    const { error } = await supabase.from("format_templates").delete().eq("id", templateId);
-    if (error) {
-      setTemplateError(error.message);
+    setTemplateSaving(true);
+    try {
+      await adminApiRequest("/api/admin/products", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "delete_format_template",
+          templateId
+        })
+      });
+    } catch (error) {
+      setTemplateError(error instanceof Error ? error.message : "Không thể xóa format template.");
       return;
+    } finally {
+      setTemplateSaving(false);
     }
     await loadFormats();
   };
@@ -902,14 +835,21 @@ export default function ProductsPage() {
     if (!nameValue || !patternValue) return;
     setTemplateError(null);
     setTemplateSaving(true);
-    const { error } = await supabase
-      .from("format_templates")
-      .update({ name: nameValue, pattern: patternValue })
-      .eq("id", editingTemplate.id);
-    setTemplateSaving(false);
-    if (error) {
-      setTemplateError(error.message);
+    try {
+      await adminApiRequest("/api/admin/products", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "update_format_template",
+          templateId: editingTemplate.id,
+          name: nameValue,
+          pattern: patternValue
+        })
+      });
+    } catch (error) {
+      setTemplateError(error instanceof Error ? error.message : "Không thể cập nhật format template.");
       return;
+    } finally {
+      setTemplateSaving(false);
     }
     cancelEditTemplate();
     await loadFormats();
@@ -926,12 +866,12 @@ export default function ProductsPage() {
           <button className="button" type="button" onClick={() => setCreateProductOpen(true)}>
             Thêm sản phẩm
           </button>
-          <button className="button secondary" type="button" onClick={() => setFolderCreateOpen((value) => !value)}>
-            {folderCreateOpen ? "Đóng folder" : "Quản lý folder"}
+          <button className="button secondary" type="button" onClick={() => setFolderCreateOpen(true)}>
+            Thêm folder
           </button>
           {adminSession?.role === "superadmin" && (
-            <button className="button secondary" type="button" onClick={() => setTemplateCreateOpen((value) => !value)}>
-              {templateCreateOpen ? "Đóng format" : "Format templates"}
+            <button className="button secondary" type="button" onClick={() => setTemplateCreateOpen(true)}>
+              Thêm format
             </button>
           )}
         </div>
@@ -945,12 +885,14 @@ export default function ProductsPage() {
               Folder chỉ áp dụng cho Telegram Bot. Xóa folder sẽ không xóa sản phẩm, chỉ đưa sản phẩm về danh sách top-level.
             </p>
           </div>
-          <button className="button secondary" type="button" onClick={() => setFolderCreateOpen((value) => !value)}>
-            {folderCreateOpen ? "Đóng" : "Thêm folder"}
-          </button>
         </div>
-        {folderCreateOpen && (
-          <div className="action-panel">
+        {folderCreateOpen && renderModal(
+          <div className="modal-backdrop" onClick={() => !folderSaving && setFolderCreateOpen(false)}>
+            <div className="modal" onClick={(event) => event.stopPropagation()}>
+              <h3 className="section-title">Thêm folder Bot</h3>
+              <p className="muted" style={{ marginTop: 8 }}>
+                Folder chỉ dùng để nhóm sản phẩm trong Telegram Bot.
+              </p>
             <form className="form-grid" onSubmit={handleAddFolder}>
               <input
                 className="input"
@@ -965,8 +907,21 @@ export default function ProductsPage() {
                 value={folderSortPosition}
                 onChange={(e) => setFolderSortPosition(e.target.value)}
               />
-              <button className="button" type="submit">Thêm folder</button>
+              <div className="modal-actions">
+                <button className="button" type="submit" disabled={folderSaving}>
+                  {folderSaving ? "Đang thêm..." : "Thêm folder"}
+                </button>
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={() => setFolderCreateOpen(false)}
+                  disabled={folderSaving}
+                >
+                  Hủy
+                </button>
+              </div>
             </form>
+            </div>
           </div>
         )}
         {folderError && (
@@ -991,15 +946,11 @@ export default function ProductsPage() {
                 <td>{folder.sort_position ?? "-"}</td>
                 <td>{folder.name}</td>
                 <td>{folderProductCounts.get(folder.id) || 0}</td>
-                <td>
-                  <div className="product-row-actions">
-                    <button className="button secondary action-pill" type="button" onClick={() => startEditFolder(folder)}>
-                      Chỉnh sửa
-                    </button>
-                    <button className="button danger action-pill" type="button" onClick={() => setDeleteFolder(folder)}>
-                      Xóa folder
-                    </button>
-                  </div>
+                <td className="row-actions-cell">
+                  <RowActionMenu items={[
+                    { label: "Chỉnh sửa", onSelect: () => startEditFolder(folder) },
+                    { label: "Xóa folder", tone: "danger", onSelect: () => setDeleteFolder(folder) }
+                  ]} />
                 </td>
               </tr>
             ))}
@@ -1012,17 +963,24 @@ export default function ProductsPage() {
         </table>
       </div>
 
-      {createProductOpen && (
-        <div className="card action-panel">
-          <div className="section-head">
-            <div>
-              <h3 className="section-title">Thêm sản phẩm mới</h3>
-              <p className="muted">Chỉ mở form khi cần tạo mới để giữ trang sản phẩm dễ quét.</p>
-            </div>
-            <button className="button secondary" type="button" onClick={() => setCreateProductOpen(false)}>
-              Đóng
-            </button>
-          </div>
+      {createProductOpen && renderModal(
+        <div className="modal-backdrop" onClick={() => !productSaving && setCreateProductOpen(false)}>
+          <div className="modal modal-wide modal-scrollable" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-scroll-region">
+              <div className="section-head">
+                <div>
+                  <h3 className="section-title">Thêm sản phẩm mới</h3>
+                  <p className="muted">Tạo sản phẩm trong modal để danh sách chính luôn gọn và dễ quét.</p>
+                </div>
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={() => setCreateProductOpen(false)}
+                  disabled={productSaving}
+                >
+                  Đóng
+                </button>
+              </div>
           <form className="form-grid" onSubmit={handleAdd}>
             <input className="input" placeholder="Tên sản phẩm" value={name} onChange={(e) => setName(e.target.value)} required />
             <input
@@ -1120,8 +1078,17 @@ export default function ProductsPage() {
               />
             </div>
             <div className="modal-actions">
-              <button className="button" type="submit">Thêm sản phẩm</button>
-              <button className="button secondary" type="button" onClick={() => setCreateProductOpen(false)}>Hủy</button>
+              <button className="button" type="submit" disabled={productSaving}>
+                {productSaving ? "Đang thêm..." : "Thêm sản phẩm"}
+              </button>
+              <button
+                className="button secondary"
+                type="button"
+                onClick={() => setCreateProductOpen(false)}
+                disabled={productSaving}
+              >
+                Hủy
+              </button>
             </div>
           </form>
           {productError && (
@@ -1129,6 +1096,8 @@ export default function ProductsPage() {
               Lỗi: {productError}
             </p>
           )}
+            </div>
+          </div>
         </div>
       )}
 
@@ -1208,35 +1177,20 @@ export default function ProductsPage() {
                 </td>
                 <td>{product.description ?? ""}</td>
                 <td>{product.format_data ?? ""}</td>
-                <td className="product-actions-cell">
-                  <div className="product-row-actions">
-                    <button className="button secondary action-pill" onClick={() => startEdit(product)}>
-                      Chỉnh sửa
-                    </button>
-                    {product.is_deleted ? (
-                      <button
-                        className="button warning action-pill"
-                        onClick={() => handleRestore(product)}
-                      >
-                        Khôi phục
-                      </button>
-                    ) : (
-                      <>
-                        <button
-                          className="button warning action-pill"
-                          onClick={() => handleToggleHidden(product)}
-                        >
-                          {product.is_hidden ? "Bỏ ẩn" : "Ẩn"}
-                        </button>
-                        <button
-                          className="button danger action-pill"
-                          onClick={() => setDeleteProduct(product)}
-                        >
-                          Xóa mềm
-                        </button>
-                      </>
-                    )}
-                  </div>
+                <td className="row-actions-cell">
+                  <RowActionMenu
+                    items={product.is_deleted
+                      ? [
+                          { label: "Chỉnh sửa", onSelect: () => startEdit(product) },
+                          { label: "Khôi phục", tone: "warning", onSelect: () => handleRestore(product) }
+                        ]
+                      : [
+                          { label: "Chỉnh sửa", onSelect: () => startEdit(product) },
+                          { label: product.is_hidden ? "Bỏ ẩn" : "Ẩn", tone: "warning", onSelect: () => handleToggleHidden(product) },
+                          { label: "Xóa mềm", tone: "danger", onSelect: () => setDeleteProduct(product) }
+                        ]
+                    }
+                  />
                 </td>
               </tr>
             ))}
@@ -1262,12 +1216,14 @@ export default function ProductsPage() {
               <h3 className="section-title">Format templates</h3>
               <p className="muted">Mẫu format dùng lại khi tạo hoặc chỉnh sửa sản phẩm.</p>
             </div>
-            <button className="button secondary" type="button" onClick={() => setTemplateCreateOpen((value) => !value)}>
-              {templateCreateOpen ? "Đóng" : "Thêm format"}
-            </button>
           </div>
-          {templateCreateOpen && (
-            <div className="action-panel">
+          {templateCreateOpen && renderModal(
+            <div className="modal-backdrop" onClick={() => !templateSaving && setTemplateCreateOpen(false)}>
+              <div className="modal" onClick={(event) => event.stopPropagation()}>
+                <h3 className="section-title">Thêm format template</h3>
+                <p className="muted" style={{ marginTop: 8 }}>
+                  Lưu mẫu format để tái sử dụng khi tạo hoặc chỉnh sửa sản phẩm.
+                </p>
               <form className="form-grid" onSubmit={handleAddTemplate}>
                 <input
                   className="input"
@@ -1283,10 +1239,21 @@ export default function ProductsPage() {
                   onChange={(e) => setTemplatePattern(e.target.value)}
                   required
                 />
-                <button className="button" type="submit" disabled={templateSaving}>
-                  {templateSaving ? "Đang thêm..." : "Thêm format"}
-                </button>
+                <div className="modal-actions">
+                  <button className="button" type="submit" disabled={templateSaving}>
+                    {templateSaving ? "Đang thêm..." : "Thêm format"}
+                  </button>
+                  <button
+                    className="button secondary"
+                    type="button"
+                    onClick={() => setTemplateCreateOpen(false)}
+                    disabled={templateSaving}
+                  >
+                    Hủy
+                  </button>
+                </div>
               </form>
+              </div>
             </div>
           )}
           {templateError && (
@@ -1309,9 +1276,11 @@ export default function ProductsPage() {
                   <td>#{format.id}</td>
                   <td>{format.name}</td>
                   <td>{format.pattern}</td>
-                  <td>
-                    <button className="button secondary" onClick={() => startEditTemplate(format)}>Chỉnh sửa</button>
-                    <button className="button danger" onClick={() => handleDeleteTemplate(format.id)}>Xóa</button>
+                  <td className="row-actions-cell">
+                    <RowActionMenu items={[
+                      { label: "Chỉnh sửa", onSelect: () => startEditTemplate(format) },
+                      { label: "Xóa", tone: "danger", disabled: templateSaving, onSelect: () => handleDeleteTemplate(format.id) }
+                    ]} />
                   </td>
                 </tr>
               ))}
@@ -1325,7 +1294,7 @@ export default function ProductsPage() {
         </div>
       )}
 
-      {editingProduct && (
+      {editingProduct && renderModal(
         <div className="modal-backdrop" onClick={cancelEdit}>
           <div className="modal" onClick={(event) => event.stopPropagation()}>
             <h3 className="section-title">Chỉnh sửa sản phẩm #{editingProduct.id}</h3>
@@ -1426,15 +1395,19 @@ export default function ProductsPage() {
                 </p>
               )}
               <div className="modal-actions">
-                <button className="button" type="submit">Lưu</button>
-                <button className="button secondary" type="button" onClick={cancelEdit}>Hủy</button>
+                <button className="button" type="submit" disabled={productSaving}>
+                  {productSaving ? "Đang lưu..." : "Lưu"}
+                </button>
+                <button className="button secondary" type="button" onClick={cancelEdit} disabled={productSaving}>
+                  Hủy
+                </button>
               </div>
             </form>
           </div>
         </div>
       )}
 
-      {editingFolder && (
+      {editingFolder && renderModal(
         <div className="modal-backdrop" onClick={cancelEditFolder}>
           <div className="modal" onClick={(event) => event.stopPropagation()}>
             <h3 className="section-title">Chỉnh sửa folder #{editingFolder.id}</h3>
@@ -1458,15 +1431,19 @@ export default function ProductsPage() {
                 </p>
               )}
               <div className="modal-actions">
-                <button className="button" type="submit">Lưu</button>
-                <button className="button secondary" type="button" onClick={cancelEditFolder}>Hủy</button>
+                <button className="button" type="submit" disabled={folderSaving}>
+                  {folderSaving ? "Đang lưu..." : "Lưu"}
+                </button>
+                <button className="button secondary" type="button" onClick={cancelEditFolder} disabled={folderSaving}>
+                  Hủy
+                </button>
               </div>
             </form>
           </div>
         </div>
       )}
 
-      {editingTemplate && (
+      {editingTemplate && renderModal(
         <div className="modal-backdrop" onClick={cancelEditTemplate}>
           <div className="modal" onClick={(event) => event.stopPropagation()}>
             <h3 className="section-title">Chỉnh sửa format #{editingTemplate.id}</h3>
@@ -1498,7 +1475,7 @@ export default function ProductsPage() {
         </div>
       )}
 
-      {deleteFolder && (
+      {deleteFolder && renderModal(
         <div className="modal-backdrop" onClick={() => setDeleteFolder(null)}>
           <div className="modal" onClick={(event) => event.stopPropagation()}>
             <h3 className="section-title">Xóa folder #{deleteFolder.id}</h3>
@@ -1513,7 +1490,7 @@ export default function ProductsPage() {
         </div>
       )}
 
-      {deleteProduct && (
+      {deleteProduct && renderModal(
         <div className="modal-backdrop" onClick={() => setDeleteProduct(null)}>
           <div className="modal" onClick={(event) => event.stopPropagation()}>
             <h3 className="section-title">Xóa mềm sản phẩm #{deleteProduct.id}</h3>

@@ -10,6 +10,9 @@ const SETTINGS_KEYS = [
   "sepay_token",
   "binance_api_key",
   "binance_api_secret",
+  "binance_pay_id",
+  "binance_direct_address",
+  "binance_direct_address_tag",
   "binance_direct_enabled",
   "binance_direct_coin",
   "binance_direct_network",
@@ -176,7 +179,7 @@ export default function SettingsPage() {
             onChange={(e) => updateField("admin_contact", e.target.value)}
           />
           <div className="form-section">
-            <div className="section-title">Binance on-chain auto payment</div>
+            <div className="section-title">Binance payment</div>
             <p className="muted" style={{ marginBottom: 10 }}>
               Dùng cho checkout tự động bằng Binance trong bot Telegram. Có thể nhập tên phổ biến của network như `TRC20`, `BEP20`, `ERC20`; hệ thống sẽ tự map sang mã Binance tương ứng.
             </p>
@@ -188,38 +191,82 @@ export default function SettingsPage() {
               />
               <span>Bật Binance on-chain</span>
             </label>
-            <input
-              className="input"
-              type="password"
-              placeholder={getSecretPlaceholder("binance_api_key", secretPresent, "Binance API Key")}
-              value={values.binance_api_key || ""}
-              onChange={(e) => updateField("binance_api_key", e.target.value)}
-            />
-            <input
-              className="input"
-              type="password"
-              placeholder={getSecretPlaceholder("binance_api_secret", secretPresent, "Binance API Secret")}
-              value={values.binance_api_secret || ""}
-              onChange={(e) => updateField("binance_api_secret", e.target.value)}
-            />
-            <input
-              className="input"
-              placeholder="Coin (ví dụ: USDT)"
-              value={values.binance_direct_coin || "USDT"}
-              onChange={(e) => updateField("binance_direct_coin", e.target.value)}
-            />
-            <input
-              className="input"
-              placeholder="Network (ví dụ: TRX / TRC20, BSC / BEP20, ETH / ERC20)"
-              value={values.binance_direct_network || ""}
-              onChange={(e) => updateField("binance_direct_network", e.target.value)}
-            />
-            <input
-              className="input"
-              placeholder="Tỷ giá VND / 1 coin (ví dụ: 25000)"
-              value={values.binance_direct_rate || ""}
-              onChange={(e) => updateField("binance_direct_rate", e.target.value)}
-            />
+            <div className="grid" style={{ gap: 10 }}>
+              <label className="grid" style={{ gap: 6 }}>
+                <span className="muted">Binance API Key</span>
+                <input
+                  className="input"
+                  type="password"
+                  placeholder={getSecretPlaceholder("binance_api_key", secretPresent, "Binance API Key")}
+                  value={values.binance_api_key || ""}
+                  onChange={(e) => updateField("binance_api_key", e.target.value)}
+                />
+              </label>
+              <label className="grid" style={{ gap: 6 }}>
+                <span className="muted">Binance API Secret</span>
+                <input
+                  className="input"
+                  type="password"
+                  placeholder={getSecretPlaceholder("binance_api_secret", secretPresent, "Binance API Secret")}
+                  value={values.binance_api_secret || ""}
+                  onChange={(e) => updateField("binance_api_secret", e.target.value)}
+                />
+              </label>
+              <label className="grid" style={{ gap: 6 }}>
+                <span className="muted">Binance Pay ID</span>
+                <input
+                  className="input"
+                  placeholder="Ví dụ: 1039622524"
+                  value={values.binance_pay_id || ""}
+                  onChange={(e) => updateField("binance_pay_id", e.target.value)}
+                />
+              </label>
+              <label className="grid" style={{ gap: 6 }}>
+                <span className="muted">Deposit address hiển thị/copy cho khách</span>
+                <input
+                  className="input"
+                  placeholder="Ví dụ: 0x... / T... / địa chỉ nạp trên Binance"
+                  value={values.binance_direct_address || ""}
+                  onChange={(e) => updateField("binance_direct_address", e.target.value)}
+                />
+              </label>
+              <label className="grid" style={{ gap: 6 }}>
+                <span className="muted">Memo/Tag nếu network yêu cầu</span>
+                <input
+                  className="input"
+                  placeholder="Để trống nếu không có memo/tag"
+                  value={values.binance_direct_address_tag || ""}
+                  onChange={(e) => updateField("binance_direct_address_tag", e.target.value)}
+                />
+              </label>
+              <label className="grid" style={{ gap: 6 }}>
+                <span className="muted">Coin</span>
+                <input
+                  className="input"
+                  placeholder="Ví dụ: USDT"
+                  value={values.binance_direct_coin || "USDT"}
+                  onChange={(e) => updateField("binance_direct_coin", e.target.value)}
+                />
+              </label>
+              <label className="grid" style={{ gap: 6 }}>
+                <span className="muted">Network</span>
+                <input
+                  className="input"
+                  placeholder="Ví dụ: TRX / TRC20, BSC / BEP20, ETH / ERC20"
+                  value={values.binance_direct_network || ""}
+                  onChange={(e) => updateField("binance_direct_network", e.target.value)}
+                />
+              </label>
+              <label className="grid" style={{ gap: 6 }}>
+                <span className="muted">Tỷ giá VND / 1 coin</span>
+                <input
+                  className="input"
+                  placeholder="Ví dụ: 25000"
+                  value={values.binance_direct_rate || ""}
+                  onChange={(e) => updateField("binance_direct_rate", e.target.value)}
+                />
+              </label>
+            </div>
           </div>
           <div className="form-section">
             <div className="section-title">Text menu Danh mục</div>

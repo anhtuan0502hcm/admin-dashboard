@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { performAdminFinanceAction } from "@/lib/adminFinanceClient";
+import { ConfirmDialog, RowActionMenu } from "@/components/AdminUi";
 
 interface Deposit {
   id: number;
@@ -13,11 +14,14 @@ interface Deposit {
   created_at: string;
 }
 
+type PendingDepositAction = { type: "confirm" | "cancel"; deposit: Deposit } | null;
+
 export default function DepositsPage() {
   const [deposits, setDeposits] = useState<Deposit[]>([]);
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<"success" | "error" | null>(null);
   const [actionKey, setActionKey] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<PendingDepositAction>(null);
 
   const load = async () => {
     const { data } = await supabase
@@ -68,6 +72,17 @@ export default function DepositsPage() {
     }
   };
 
+  const confirmPendingAction = async () => {
+    if (!pendingAction) return;
+    const action = pendingAction;
+    if (action.type === "confirm") {
+      await confirmDeposit(action.deposit);
+    } else {
+      await cancelDeposit(action.deposit);
+    }
+    setPendingAction(null);
+  };
+
   return (
     <div className="grid" style={{ gap: 24 }}>
       <div className="topbar">
@@ -108,22 +123,20 @@ export default function DepositsPage() {
                 <td>{deposit.amount.toLocaleString()}</td>
                 <td>{deposit.code}</td>
                 <td>{new Date(deposit.created_at).toLocaleString()}</td>
-                <td>
-                  <button
-                    className="button"
-                    disabled={actionKey === `confirm:${deposit.id}` || actionKey === `cancel:${deposit.id}`}
-                    onClick={() => confirmDeposit(deposit)}
-                  >
-                    {actionKey === `confirm:${deposit.id}` ? "Đang duyệt..." : "Duyệt"}
-                  </button>
-                  <button
-                    className="button secondary"
-                    style={{ marginLeft: 8 }}
-                    disabled={actionKey === `confirm:${deposit.id}` || actionKey === `cancel:${deposit.id}`}
-                    onClick={() => cancelDeposit(deposit)}
-                  >
-                    {actionKey === `cancel:${deposit.id}` ? "Đang từ chối..." : "Từ chối"}
-                  </button>
+                <td className="row-actions-cell">
+                  <RowActionMenu items={[
+                    {
+                      label: actionKey === `confirm:${deposit.id}` ? "Đang duyệt..." : "Duyệt",
+                      disabled: actionKey === `confirm:${deposit.id}` || actionKey === `cancel:${deposit.id}`,
+                      onSelect: () => setPendingAction({ type: "confirm", deposit })
+                    },
+                    {
+                      label: actionKey === `cancel:${deposit.id}` ? "Đang từ chối..." : "Từ chối",
+                      tone: "danger",
+                      disabled: actionKey === `confirm:${deposit.id}` || actionKey === `cancel:${deposit.id}`,
+                      onSelect: () => setPendingAction({ type: "cancel", deposit })
+                    }
+                  ]} />
                 </td>
               </tr>
             ))}
@@ -135,6 +148,25 @@ export default function DepositsPage() {
           </tbody>
         </table>
       </div>
+
+      <ConfirmDialog
+        open={Boolean(pendingAction)}
+        title={pendingAction?.type === "confirm" ? "Duyệt yêu cầu nạp?" : "Từ chối yêu cầu nạp?"}
+        description={
+          pendingAction ? (
+            <>
+              Yêu cầu #{pendingAction.deposit.id} của user {pendingAction.deposit.user_id}, số tiền{" "}
+              <strong>{pendingAction.deposit.amount.toLocaleString()}đ</strong>, mã{" "}
+              <strong>{pendingAction.deposit.code}</strong>.
+            </>
+          ) : null
+        }
+        confirmLabel={pendingAction?.type === "confirm" ? "Duyệt nạp" : "Từ chối"}
+        tone={pendingAction?.type === "confirm" ? "primary" : "danger"}
+        busy={Boolean(pendingAction && actionKey === `${pendingAction.type}:${pendingAction.deposit.id}`)}
+        onConfirm={confirmPendingAction}
+        onCancel={() => setPendingAction(null)}
+      />
     </div>
   );
 }

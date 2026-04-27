@@ -20,8 +20,16 @@ import type {
   LicenseKeyDeviceLimitMode,
   LicenseKeyRecord
 } from "@/lib/licenseTypes";
+import { ConfirmDialog, RowActionMenu } from "@/components/AdminUi";
 
 type LicenseTab = "extensions" | "keys" | "activations";
+
+type LicenseConfirmAction =
+  | { type: "delete-extension"; extension: LicenseExtensionRecord }
+  | { type: "revoke-key"; key: LicenseKeyRecord }
+  | { type: "reset-key"; key: LicenseKeyRecord }
+  | { type: "reset-activation"; activation: LicenseActivationRecord }
+  | null;
 
 const createDefaultExpiryInput = () => {
   const date = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
@@ -99,6 +107,7 @@ export default function LicensesPage() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<LicenseConfirmAction>(null);
 
   const [extensionCode, setExtensionCode] = useState("");
   const [extensionName, setExtensionName] = useState("");
@@ -246,9 +255,6 @@ export default function LicensesPage() {
   };
 
   const handleDeleteExtension = async (extension: LicenseExtensionRecord) => {
-    if (!window.confirm(`Xóa extension ${extension.code}?`)) {
-      return;
-    }
     clearFeedback();
     setBusyAction(`delete-extension-${extension.id}`);
     try {
@@ -330,9 +336,6 @@ export default function LicensesPage() {
   };
 
   const handleRevokeKey = async (key: LicenseKeyRecord) => {
-    if (!window.confirm(`Thu hồi key ${key.maskedKey}?`)) {
-      return;
-    }
     clearFeedback();
     setBusyAction(`revoke-key-${key.id}`);
     try {
@@ -361,9 +364,6 @@ export default function LicensesPage() {
   };
 
   const handleResetAllActivations = async (keyId: number) => {
-    if (!window.confirm("Reset tất cả bind hiện tại của key này?")) {
-      return;
-    }
     clearFeedback();
     setBusyAction(`reset-key-${keyId}`);
     try {
@@ -378,9 +378,6 @@ export default function LicensesPage() {
   };
 
   const handleResetSingleActivation = async (activation: LicenseActivationRecord) => {
-    if (!window.confirm(`Reset bind cho fingerprint "${activation.fingerprint}"?`)) {
-      return;
-    }
     clearFeedback();
     setBusyAction(`reset-activation-${activation.id}`);
     try {
@@ -405,6 +402,65 @@ export default function LicensesPage() {
   };
 
   const extensionOptions = extensions.slice().sort((a, b) => a.code.localeCompare(b.code));
+  const pendingConfirmBusy =
+    pendingConfirm?.type === "delete-extension"
+      ? busyAction === `delete-extension-${pendingConfirm.extension.id}`
+      : pendingConfirm?.type === "revoke-key"
+        ? busyAction === `revoke-key-${pendingConfirm.key.id}`
+        : pendingConfirm?.type === "reset-key"
+          ? busyAction === `reset-key-${pendingConfirm.key.id}`
+          : pendingConfirm?.type === "reset-activation"
+            ? busyAction === `reset-activation-${pendingConfirm.activation.id}`
+            : false;
+
+  const confirmPendingLicenseAction = async () => {
+    if (!pendingConfirm) return;
+    const action = pendingConfirm;
+    if (action.type === "delete-extension") {
+      await handleDeleteExtension(action.extension);
+    } else if (action.type === "revoke-key") {
+      await handleRevokeKey(action.key);
+    } else if (action.type === "reset-key") {
+      await handleResetAllActivations(action.key.id);
+    } else {
+      await handleResetSingleActivation(action.activation);
+    }
+    setPendingConfirm(null);
+  };
+
+  const confirmTitle =
+    pendingConfirm?.type === "delete-extension"
+      ? "Xóa extension?"
+      : pendingConfirm?.type === "revoke-key"
+        ? "Thu hồi license key?"
+        : pendingConfirm?.type === "reset-key"
+          ? "Reset tất cả bind?"
+          : "Reset bind này?";
+
+  const confirmDescription = pendingConfirm ? (
+    <>
+      {pendingConfirm.type === "delete-extension" && (
+        <>
+          Extension <strong>{pendingConfirm.extension.code}</strong> sẽ bị xóa khỏi danh sách quản trị.
+        </>
+      )}
+      {pendingConfirm.type === "revoke-key" && (
+        <>
+          Key <strong>{pendingConfirm.key.maskedKey}</strong> sẽ bị thu hồi và không còn xác thực được.
+        </>
+      )}
+      {pendingConfirm.type === "reset-key" && (
+        <>
+          Tất cả bind hiện tại của key <strong>{pendingConfirm.key.maskedKey}</strong> sẽ bị reset.
+        </>
+      )}
+      {pendingConfirm.type === "reset-activation" && (
+        <>
+          Bind fingerprint <strong>{pendingConfirm.activation.fingerprint}</strong> sẽ bị reset.
+        </>
+      )}
+    </>
+  ) : null;
 
   return (
     <div className="grid license-layout" style={{ gap: 24 }}>
@@ -564,20 +620,16 @@ export default function LicensesPage() {
                       <td>{extension.keyCount}</td>
                       <td>{extension.activeActivationCount}</td>
                       <td>{formatDateTime(extension.updatedAt)}</td>
-                      <td className="product-actions-cell">
-                        <div className="product-row-actions">
-                          <button className="button secondary action-pill" type="button" onClick={() => openEditExtension(extension)}>
-                            Sửa
-                          </button>
-                          <button
-                            className="button warning action-pill"
-                            type="button"
-                            onClick={() => handleDeleteExtension(extension)}
-                            disabled={busyAction === `delete-extension-${extension.id}`}
-                          >
-                            Xóa
-                          </button>
-                        </div>
+                      <td className="row-actions-cell">
+                        <RowActionMenu items={[
+                          { label: "Sửa", onSelect: () => openEditExtension(extension) },
+                          {
+                            label: "Xóa",
+                            tone: "danger",
+                            disabled: busyAction === `delete-extension-${extension.id}`,
+                            onSelect: () => setPendingConfirm({ type: "delete-extension", extension })
+                          }
+                        ]} />
                       </td>
                     </tr>
                   ))}
@@ -734,39 +786,30 @@ export default function LicensesPage() {
                       <td>{formatDateTime(key.expiresAt)}</td>
                       <td className="cell-truncate">{key.note || "-"}</td>
                       <td>{formatDateTime(key.createdAt)}</td>
-                      <td className="product-actions-cell">
-                        <div className="product-row-actions">
-                          <button className="button secondary action-pill" type="button" onClick={() => openEditKey(key)}>
-                            Sửa
-                          </button>
-                          {key.status === "revoked" ? (
-                            <button
-                              className="button secondary action-pill"
-                              type="button"
-                              onClick={() => handleReactivateKey(key)}
-                              disabled={busyAction === `reactivate-key-${key.id}`}
-                            >
-                              Mở khóa
-                            </button>
-                          ) : (
-                            <button
-                              className="button warning action-pill"
-                              type="button"
-                              onClick={() => handleRevokeKey(key)}
-                              disabled={busyAction === `revoke-key-${key.id}`}
-                            >
-                              Thu hồi
-                            </button>
-                          )}
-                          <button
-                            className="button danger action-pill"
-                            type="button"
-                            onClick={() => handleResetAllActivations(key.id)}
-                            disabled={busyAction === `reset-key-${key.id}`}
-                          >
-                            Reset tất cả bind
-                          </button>
-                        </div>
+                      <td className="row-actions-cell">
+                        <RowActionMenu
+                          items={[
+                            { label: "Sửa", onSelect: () => openEditKey(key) },
+                            key.status === "revoked"
+                              ? {
+                                  label: "Mở khóa",
+                                  disabled: busyAction === `reactivate-key-${key.id}`,
+                                  onSelect: () => handleReactivateKey(key)
+                                }
+                              : {
+                                  label: "Thu hồi",
+                                  tone: "warning",
+                                  disabled: busyAction === `revoke-key-${key.id}`,
+                                  onSelect: () => setPendingConfirm({ type: "revoke-key", key })
+                                },
+                            {
+                              label: "Reset tất cả bind",
+                              tone: "danger",
+                              disabled: busyAction === `reset-key-${key.id}`,
+                              onSelect: () => setPendingConfirm({ type: "reset-key", key })
+                            }
+                          ]}
+                        />
                       </td>
                     </tr>
                   ))}
@@ -845,17 +888,15 @@ export default function LicensesPage() {
                     <td>{formatDateTime(activation.activatedAt)}</td>
                     <td>{formatDateTime(activation.lastCheckedAt)}</td>
                     <td>{activation.lastVersion || "-"}</td>
-                    <td className="product-actions-cell">
-                      <div className="product-row-actions">
-                        <button
-                          className="button danger action-pill"
-                          type="button"
-                          onClick={() => handleResetSingleActivation(activation)}
-                          disabled={busyAction === `reset-activation-${activation.id}`}
-                        >
-                          Reset bind này
-                        </button>
-                      </div>
+                    <td className="row-actions-cell">
+                      <RowActionMenu items={[
+                        {
+                          label: "Reset bind này",
+                          tone: "danger",
+                          disabled: busyAction === `reset-activation-${activation.id}`,
+                          onSelect: () => setPendingConfirm({ type: "reset-activation", activation })
+                        }
+                      ]} />
                     </td>
                   </tr>
                 ))}
@@ -871,6 +912,22 @@ export default function LicensesPage() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={Boolean(pendingConfirm)}
+        title={confirmTitle}
+        description={confirmDescription}
+        confirmLabel={
+          pendingConfirm?.type === "delete-extension"
+            ? "Xóa extension"
+            : pendingConfirm?.type === "revoke-key"
+              ? "Thu hồi key"
+              : "Reset bind"
+        }
+        busy={pendingConfirmBusy}
+        onConfirm={confirmPendingLicenseAction}
+        onCancel={() => setPendingConfirm(null)}
+      />
 
       {editingExtension && (
         <div className="modal-backdrop">

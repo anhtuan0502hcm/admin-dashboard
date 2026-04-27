@@ -1,8 +1,9 @@
 "use client";
 
 import { Fragment, useDeferredValue, useEffect, useState } from "react";
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
+import { RowActionMenu } from "@/components/AdminUi";
 import {
   fetchUserOrdersSnapshot,
   fetchUsersSnapshot,
@@ -50,6 +51,7 @@ type TelegramBroadcastJobSnapshot = {
 };
 
 export default function UsersPage() {
+  const router = useRouter();
   const PAGE_SIZE = 50;
   const [users, setUsers] = useState<UserSnapshotRow[]>([]);
   const [search, setSearch] = useState("");
@@ -567,10 +569,10 @@ export default function UsersPage() {
                 <td>{user.balance_usdt?.toString() ?? "0"}</td>
                 <td>{user.language ?? "vi"}</td>
                 <td>{formatDateTime(user.created_at)}</td>
-                <td>
-                  <Link className="button secondary" href={`/users/${user.user_id}`}>
-                    Nhắn tin
-                  </Link>
+                <td className="row-actions-cell">
+                  <RowActionMenu items={[
+                    { label: "Nhắn tin", onSelect: () => router.push(`/users/${user.user_id}`) }
+                  ]} />
                 </td>
               </tr>
             ))}

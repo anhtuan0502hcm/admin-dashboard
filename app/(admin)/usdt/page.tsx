@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { performAdminFinanceAction } from "@/lib/adminFinanceClient";
+import { ConfirmDialog, RowActionMenu } from "@/components/AdminUi";
 
 interface UsdtWithdrawal {
   id: number;
@@ -14,11 +15,14 @@ interface UsdtWithdrawal {
   created_at: string;
 }
 
+type PendingUsdtAction = { type: "confirm" | "cancel"; withdrawal: UsdtWithdrawal } | null;
+
 export default function UsdtPage() {
   const [usdtWithdrawals, setUsdtWithdrawals] = useState<UsdtWithdrawal[]>([]);
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<"success" | "error" | null>(null);
   const [actionKey, setActionKey] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<PendingUsdtAction>(null);
 
   const load = async () => {
     const { data: withdrawals } = await supabase
@@ -69,6 +73,17 @@ export default function UsdtPage() {
     }
   };
 
+  const confirmPendingAction = async () => {
+    if (!pendingAction) return;
+    const action = pendingAction;
+    if (action.type === "confirm") {
+      await confirmUsdtWithdrawal(action.withdrawal);
+    } else {
+      await cancelUsdtWithdrawal(action.withdrawal);
+    }
+    setPendingAction(null);
+  };
+
   return (
     <div className="grid" style={{ gap: 24 }}>
       <div className="topbar">
@@ -112,22 +127,20 @@ export default function UsdtPage() {
                 <td>{withdrawal.wallet_address}</td>
                 <td>{withdrawal.network}</td>
                 <td>{new Date(withdrawal.created_at).toLocaleString()}</td>
-                <td>
-                  <button
-                    className="button"
-                    disabled={actionKey === `withdraw_confirm:${withdrawal.id}` || actionKey === `withdraw_cancel:${withdrawal.id}`}
-                    onClick={() => confirmUsdtWithdrawal(withdrawal)}
-                  >
-                    {actionKey === `withdraw_confirm:${withdrawal.id}` ? "Đang duyệt..." : "Duyệt"}
-                  </button>
-                  <button
-                    className="button secondary"
-                    style={{ marginLeft: 8 }}
-                    disabled={actionKey === `withdraw_confirm:${withdrawal.id}` || actionKey === `withdraw_cancel:${withdrawal.id}`}
-                    onClick={() => cancelUsdtWithdrawal(withdrawal)}
-                  >
-                    {actionKey === `withdraw_cancel:${withdrawal.id}` ? "Đang từ chối..." : "Từ chối"}
-                  </button>
+                <td className="row-actions-cell">
+                  <RowActionMenu items={[
+                    {
+                      label: actionKey === `withdraw_confirm:${withdrawal.id}` ? "Đang duyệt..." : "Duyệt",
+                      disabled: actionKey === `withdraw_confirm:${withdrawal.id}` || actionKey === `withdraw_cancel:${withdrawal.id}`,
+                      onSelect: () => setPendingAction({ type: "confirm", withdrawal })
+                    },
+                    {
+                      label: actionKey === `withdraw_cancel:${withdrawal.id}` ? "Đang từ chối..." : "Từ chối",
+                      tone: "danger",
+                      disabled: actionKey === `withdraw_confirm:${withdrawal.id}` || actionKey === `withdraw_cancel:${withdrawal.id}`,
+                      onSelect: () => setPendingAction({ type: "cancel", withdrawal })
+                    }
+                  ]} />
                 </td>
               </tr>
             ))}
@@ -139,6 +152,28 @@ export default function UsdtPage() {
           </tbody>
         </table>
       </div>
+
+      <ConfirmDialog
+        open={Boolean(pendingAction)}
+        title={pendingAction?.type === "confirm" ? "Duyệt rút USDT?" : "Từ chối rút USDT?"}
+        description={
+          pendingAction ? (
+            <>
+              Yêu cầu #{pendingAction.withdrawal.id} của user {pendingAction.withdrawal.user_id}, số tiền{" "}
+              <strong>{pendingAction.withdrawal.usdt_amount} USDT</strong> qua mạng{" "}
+              <strong>{pendingAction.withdrawal.network}</strong>.
+            </>
+          ) : null
+        }
+        confirmLabel={pendingAction?.type === "confirm" ? "Duyệt rút" : "Từ chối"}
+        tone={pendingAction?.type === "confirm" ? "primary" : "danger"}
+        busy={Boolean(
+          pendingAction &&
+            actionKey === `withdraw_${pendingAction.type}:${pendingAction.withdrawal.id}`
+        )}
+        onConfirm={confirmPendingAction}
+        onCancel={() => setPendingAction(null)}
+      />
     </div>
   );
 }
