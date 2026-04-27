@@ -3,8 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSupabaseAdminClient } from "@/app/api/_shared/supabaseAdmin";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-const supabasePublishableKey =
-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+const supabasePublishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "";
 
 export const buildSupabaseClient = (token?: string) =>
   createClient(supabaseUrl, supabasePublishableKey, {
@@ -63,7 +62,10 @@ export async function requireAdminSession(request: NextRequest): Promise<AdminSe
   if (!supabaseUrl || !supabasePublishableKey) {
     return {
       ok: false,
-      response: NextResponse.json({ error: "Supabase env missing." }, { status: 500 })
+      response: NextResponse.json(
+        { error: "Supabase env missing. Require NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY." },
+        { status: 500 }
+      )
     };
   }
 

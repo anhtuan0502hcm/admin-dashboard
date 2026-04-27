@@ -6,21 +6,57 @@ import { usePathname, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import { AdminSessionProvider, type AdminSessionSnapshot } from "@/components/AdminSessionContext";
 import { AdminSessionClientError, fetchAdminSessionSnapshot } from "@/lib/adminSessionClient";
+import { fetchAdminOpsHealth, type AdminOpsHealth } from "@/lib/adminOpsClient";
 
-const navItems = [
-  { href: "/", label: "Dashboard" },
-  { href: "/products", label: "Products" },
-  { href: "/stock", label: "Stock" },
-  { href: "/orders", label: "Orders" },
-  { href: "/direct-orders", label: "Direct Orders" },
-  { href: "/deposits", label: "Deposits" },
-  { href: "/withdrawals", label: "Withdrawals" },
-  { href: "/usdt", label: "USDT" },
-  { href: "/users", label: "Users" },
-  { href: "/reports", label: "Reports" },
-  { href: "/licenses", label: "Licenses" },
-  { href: "/settings", label: "Settings" }
+const navGroups = [
+  {
+    label: "Monitor",
+    items: [
+      { href: "/", label: "Dashboard" },
+      { href: "/health", label: "System Health" },
+      { href: "/reports", label: "Reports" }
+    ]
+  },
+  {
+    label: "Catalog",
+    items: [
+      { href: "/products", label: "Products" },
+      { href: "/sales", label: "Sales" },
+      { href: "/stock", label: "Stock" }
+    ]
+  },
+  {
+    label: "Fulfillment",
+    items: [
+      { href: "/orders", label: "Orders" },
+      { href: "/direct-orders", label: "Direct Orders" }
+    ]
+  },
+  {
+    label: "Finance",
+    items: [
+      { href: "/deposits", label: "Deposits" },
+      { href: "/withdrawals", label: "Withdrawals" },
+      { href: "/usdt", label: "USDT" }
+    ]
+  },
+  {
+    label: "Customers",
+    items: [{ href: "/users", label: "Users" }]
+  },
+  {
+    label: "System",
+    items: [
+      { href: "/licenses", label: "Licenses" },
+      { href: "/settings", label: "Settings" }
+    ]
+  }
 ];
+
+const NAV_GROUP_STORAGE_KEY = "botDashboardOpenNavGroups";
+
+const getDefaultNavGroupState = () =>
+  Object.fromEntries(navGroups.map((group) => [group.label, true])) as Record<string, boolean>;
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -32,6 +68,8 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const [userId, setUserId] = useState<string | null>(null);
   const [accessDenied, setAccessDenied] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
+  const [opsHealth, setOpsHealth] = useState<AdminOpsHealth | null>(null);
+  const [openNavGroups, setOpenNavGroups] = useState<Record<string, boolean>>(getDefaultNavGroupState);
 
   useEffect(() => {
     const loadSession = async () => {
@@ -50,6 +88,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         setAdminSession(nextAdminSession);
         setEmail(nextAdminSession.email ?? session.user.email ?? null);
         setUserId(nextAdminSession.userId || session.user.id);
+        fetchAdminOpsHealth().then(setOpsHealth).catch(() => setOpsHealth(null));
         setAccessDenied(false);
         setAccessError(null);
       } catch (error) {
@@ -72,10 +111,50 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     setMobileNavOpen(false);
   }, [pathname]);
 
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(NAV_GROUP_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, boolean>;
+      setOpenNavGroups({ ...getDefaultNavGroupState(), ...parsed });
+    } catch {
+      setOpenNavGroups(getDefaultNavGroupState());
+    }
+  }, []);
+
+  useEffect(() => {
+    const activeGroup = navGroups.find((group) =>
+      group.items.some((item) => pathname === item.href || (item.href !== "/" && pathname.startsWith(`${item.href}/`)))
+    );
+    if (!activeGroup) return;
+    setOpenNavGroups((prev) => (prev[activeGroup.label] ? prev : { ...prev, [activeGroup.label]: true }));
+  }, [pathname]);
+
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     router.replace("/login");
   };
+
+  const toggleNavGroup = (label: string) => {
+    setOpenNavGroups((prev) => {
+      const next = { ...prev, [label]: !(prev[label] ?? true) };
+      try {
+        localStorage.setItem(NAV_GROUP_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore local storage failures; sidebar still works for the current session.
+      }
+      return next;
+    });
+  };
+
+  const healthTone =
+    !opsHealth
+      ? "unknown"
+      : opsHealth.queues.deliveryOutbox.failed > 0 || opsHealth.queues.pendingDirectOrdersExpired > 0
+      ? "danger"
+      : opsHealth.stock.count > 0 || opsHealth.queues.deliveryOutbox.retryDue > 0
+      ? "warning"
+      : "healthy";
 
   if (loading) {
     return (
@@ -126,19 +205,51 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         </div>
         <div className="sidebar-body">
           <div className="nav">
-            {navItems.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={`nav-link ${pathname === item.href || (item.href !== "/" && pathname.startsWith(`${item.href}/`)) ? "active" : ""}`}
-              >
-                {item.label}
-              </Link>
-            ))}
+            {navGroups.map((group) => {
+              const isGroupActive = group.items.some(
+                (item) => pathname === item.href || (item.href !== "/" && pathname.startsWith(`${item.href}/`))
+              );
+              const isGroupOpen = openNavGroups[group.label] ?? true;
+
+              return (
+                <div className="nav-group" key={group.label}>
+                  <button
+                    type="button"
+                    className={`nav-group-toggle ${isGroupActive ? "active" : ""}`}
+                    aria-expanded={isGroupOpen}
+                    onClick={() => toggleNavGroup(group.label)}
+                  >
+                    <span>{group.label}</span>
+                    <span className="nav-group-caret" aria-hidden="true">
+                      {isGroupOpen ? "-" : "+"}
+                    </span>
+                  </button>
+                  {isGroupOpen && (
+                    <div className="nav-group-items">
+                      {group.items.map((item) => (
+                        <Link
+                          key={item.href}
+                          href={item.href}
+                          className={`nav-link ${pathname === item.href || (item.href !== "/" && pathname.startsWith(`${item.href}/`)) ? "active" : ""}`}
+                        >
+                          {item.label}
+                        </Link>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
 
           <div className="card dashboard-switch-card">
-            <div className="muted">Chuyển dashboard</div>
+            <div className={`ops-health-dot ${healthTone}`}>Ops {healthTone === "healthy" ? "OK" : healthTone}</div>
+            {opsHealth && (
+              <div className="sidebar-metric">
+                Pending: {opsHealth.queues.pendingDeposits + opsHealth.queues.pendingWithdrawals + opsHealth.queues.pendingUsdtWithdrawals + opsHealth.queues.pendingDirectOrders}
+              </div>
+            )}
+            <div className="muted" style={{ marginTop: 12 }}>Chuyển dashboard</div>
             <Link className="button secondary dashboard-switch-link" href="/website">
               Website Dashboard
             </Link>

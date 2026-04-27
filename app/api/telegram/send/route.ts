@@ -153,7 +153,7 @@ export async function POST(request: NextRequest) {
       jobsReady = false;
     }
 
-    const backgroundReady = jobsReady && Boolean(process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY);
+    const backgroundReady = jobsReady && Boolean(process.env.SUPABASE_SECRET_KEY);
 
     if (backgroundReady) {
       try {

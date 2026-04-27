@@ -277,6 +277,36 @@ export default function ReportsPage() {
       )})`
     : "Không áp dụng so sánh kỳ trước.";
 
+  const downloadCsv = () => {
+    const escapeCsv = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const rows = [
+      ["Section", "Metric", "Value"],
+      ["Revenue", "Period", periodLabel],
+      ["Revenue", "Current", revenue.current],
+      ["Revenue", "Previous", revenue.previous],
+      ["Revenue", "Delta", revenueDeltaAmount],
+      ["Orders", "Count", orderOps.orderCount],
+      ["Orders", "AOV", orderOps.averageOrderValue],
+      ["DirectOrders", "Total", directOrderStats.total],
+      ["DirectOrders", "Confirmed", directOrderStats.confirmed],
+      ["DirectOrders", "Failed/Cancelled", directOrderStats.failed + directOrderStats.cancelled],
+      [],
+      ["Trend", "Label", "Orders", "Revenue"],
+      ...dailyTrend.map((row) => ["Trend", row.label, row.orders, row.revenue]),
+      [],
+      ["TopProducts", "Product", "Orders", "Quantity", "Revenue"],
+      ...topProducts.map((row) => ["TopProducts", row.productName, row.orders, row.quantity, row.revenue])
+    ];
+    const csv = rows.map((row) => row.map(escapeCsv).join(",")).join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `bot-report-${resolvedPeriod}-${new Date().toISOString().slice(0, 10)}.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="grid" style={{ gap: 24 }}>
       <div className="topbar">
@@ -284,6 +314,9 @@ export default function ReportsPage() {
           <h1 className="page-title">Reports</h1>
           <p className="muted">Báo cáo vận hành và hiệu suất bán hàng.</p>
         </div>
+        <button className="button secondary" type="button" onClick={downloadCsv}>
+          Export CSV
+        </button>
       </div>
 
       <div className="card report-filter-card">

@@ -10,6 +10,7 @@ import {
   fulfillBotDirectOrder
 } from "@/app/api/_shared/directOrderFulfillment";
 import { sendPaymentRelayNotification } from "@/app/api/_shared/paymentRelay";
+import { recordAdminAuditEvent } from "@/app/api/_shared/adminAudit";
 
 const rawExpireMinutes = Number(process.env.DIRECT_ORDER_PENDING_EXPIRE_MINUTES || "10");
 const DIRECT_ORDER_PENDING_EXPIRE_MINUTES = Number.isFinite(rawExpireMinutes)
@@ -121,6 +122,19 @@ export async function POST(request: NextRequest) {
   }
 
   await sendPaymentRelayNotification(adminSession.supabase, relayLines);
+  await recordAdminAuditEvent(adminSession.supabase, {
+    adminUserId: adminSession.userId,
+    adminEmail: adminSession.email,
+    action: "direct_order.fulfill",
+    entityType: "direct_order",
+    entityId: fulfillment.direct_order_id,
+    metadata: {
+      productId: fulfillment.product_id,
+      userId: fulfillment.user_id,
+      amount: totalPrice,
+      outboxId: outbox.id
+    }
+  });
 
   return NextResponse.json({
     success: true,

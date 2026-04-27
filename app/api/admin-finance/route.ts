@@ -5,6 +5,7 @@ import {
   buildMissingRequiredRpcMessage,
   canUseUnsafeMutationFallback
 } from "@/app/api/_shared/mutationFallback";
+import { recordAdminAuditEvent } from "@/app/api/_shared/adminAudit";
 
 type FinanceResource = "deposit" | "withdrawal" | "usdt_withdrawal";
 type FinanceAction = "confirm" | "cancel";
@@ -408,6 +409,15 @@ export async function POST(request: NextRequest) {
   if (result.ok === false) {
     return NextResponse.json({ error: result.error }, { status: result.status });
   }
+
+  await recordAdminAuditEvent(adminSession.supabase, {
+    adminUserId: adminSession.userId,
+    adminEmail: adminSession.email,
+    action: `finance.${resource}.${action}`,
+    entityType: resource,
+    entityId: recordId,
+    metadata: result.data || {}
+  });
 
   return NextResponse.json({
     success: true,

@@ -1,9 +1,14 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-const API_BASE = "https://email.devtai.net/api";
-const TINYHOST_API = "https://email-inbox-receiver.vercel.app/api/tempmail-tinyhost";
-const HOTMAIL_PROXY_URL = "https://email-inbox-receiver.vercel.app/api/read-inbox";
-const DEFAULT_HOTMAIL_CLIENT_ID = "d3590ed6-52b3-4102-aeff-aad2292ab01c";
+const API_BASE = process.env.STOCK_CUSTOM_CHECK_TEMPMAIL_API_BASE || "https://email.devtai.net/api";
+const TINYHOST_API =
+  process.env.STOCK_CUSTOM_CHECK_TINYHOST_API_URL ||
+  "https://email-inbox-receiver.vercel.app/api/tempmail-tinyhost";
+const HOTMAIL_PROXY_URL =
+  process.env.STOCK_CUSTOM_CHECK_HOTMAIL_PROXY_URL ||
+  "https://email-inbox-receiver.vercel.app/api/read-inbox";
+const DEFAULT_HOTMAIL_CLIENT_ID =
+  process.env.STOCK_CUSTOM_CHECK_HOTMAIL_CLIENT_ID || "d3590ed6-52b3-4102-aeff-aad2292ab01c";
 const DEFAULT_HOTMAIL_AUTH_MODE = "graph";
 const DEFAULT_HOTMAIL_MAX_MESSAGES = 20;
 const DEFAULT_CONCURRENCY = 20;

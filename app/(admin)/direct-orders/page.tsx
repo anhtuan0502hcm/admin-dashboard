@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
+import { adminApiRequest } from "@/lib/adminOpsClient";
 
 interface DirectOrderRow {
   id: number;
@@ -122,7 +123,19 @@ export default function DirectOrdersPage() {
 
   const handleMarkFailed = async (order: DirectOrderRow) => {
     if (!confirm(`Đánh dấu thất bại đơn #${order.id}?`)) return;
-    await supabase.from("direct_orders").update({ status: "failed" }).eq("id", order.id);
+    try {
+      await adminApiRequest("/api/direct-orders/status", {
+        method: "POST",
+        body: JSON.stringify({
+          orderId: order.id,
+          status: "failed"
+        })
+      });
+      setStatus(`Đã đánh dấu thất bại đơn #${order.id}.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Không thể cập nhật đơn.");
+      return;
+    }
     await load();
   };
 

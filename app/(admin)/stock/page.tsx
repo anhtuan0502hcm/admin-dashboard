@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
+import { adminApiRequest } from "@/lib/adminOpsClient";
 
 interface Product {
   id: number;
@@ -66,6 +67,8 @@ export default function StockPage() {
   const [stockSummary, setStockSummary] = useState<StockSummary>({ total: 0, sold: 0, remaining: 0 });
   const [content, setContent] = useState("");
   const [stockFormTab, setStockFormTab] = useState<"add" | "delete">("add");
+  const [stockActionPanelOpen, setStockActionPanelOpen] = useState(false);
+  const [customCheckPanelOpen, setCustomCheckPanelOpen] = useState(false);
   const [deleteContent, setDeleteContent] = useState("");
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
@@ -79,6 +82,7 @@ export default function StockPage() {
   const [bulkSoldAction, setBulkSoldAction] = useState<"keep" | "available" | "sold">("keep");
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [stockMutationMessage, setStockMutationMessage] = useState<string | null>(null);
   const [deleteByTextPlan, setDeleteByTextPlan] = useState<{ ids: number[]; queries: string[] } | null>(
     null
   );
@@ -313,6 +317,8 @@ export default function StockPage() {
       setTotalCount(0);
       setStockSummary({ total: 0, sold: 0, remaining: 0 });
       setSelectedStockIds(new Set());
+      setStockActionPanelOpen(false);
+      setCustomCheckPanelOpen(false);
       setCustomCheckResults([]);
       setCustomCheckError(null);
       setCustomCheckProgress({ completed: 0, total: 0 });
@@ -379,12 +385,20 @@ export default function StockPage() {
     const lines = parseMultiline(content);
     if (!lines.length) return;
 
-    const payload = lines.map((line) => ({
-      product_id: Number(selectedProductId),
-      content: line
-    }));
-
-    await supabase.from("stock").insert(payload);
+    try {
+      await adminApiRequest("/api/admin/stock", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "add_bulk",
+          productId: Number(selectedProductId),
+          contents: lines
+        })
+      });
+      setStockMutationMessage(`Đã thêm ${lines.length.toLocaleString("vi-VN")} stock.`);
+    } catch (error) {
+      setStockMutationMessage(error instanceof Error ? error.message : "Không thể thêm stock.");
+      return;
+    }
     setContent("");
     await loadStockSummary(selectedProductId);
     if (page === 1) {
@@ -425,7 +439,21 @@ export default function StockPage() {
     }
     setBulkBusy(true);
     const soldValue = bulkSoldAction === "sold";
-    await supabase.from("stock").update({ sold: soldValue }).in("id", ids);
+    try {
+      await adminApiRequest("/api/admin/stock", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "bulk_update_sold",
+          ids,
+          sold: soldValue
+        })
+      });
+      setStockMutationMessage(`Đã cập nhật ${ids.length.toLocaleString("vi-VN")} stock.`);
+    } catch (error) {
+      setStockMutationMessage(error instanceof Error ? error.message : "Không thể cập nhật stock.");
+      setBulkBusy(false);
+      return;
+    }
     setBulkBusy(false);
     setBulkEditOpen(false);
     setBulkSoldAction("keep");
@@ -439,7 +467,20 @@ export default function StockPage() {
     const ids = Array.from(selectedStockIds);
     if (!ids.length) return;
     setBulkBusy(true);
-    await supabase.from("stock").delete().in("id", ids);
+    try {
+      await adminApiRequest("/api/admin/stock", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "bulk_delete",
+          ids
+        })
+      });
+      setStockMutationMessage(`Đã xóa ${ids.length.toLocaleString("vi-VN")} stock.`);
+    } catch (error) {
+      setStockMutationMessage(error instanceof Error ? error.message : "Không thể xóa stock.");
+      setBulkBusy(false);
+      return;
+    }
     setBulkBusy(false);
     setBulkDeleteOpen(false);
     setSelectedStockIds(new Set());
@@ -490,8 +531,15 @@ export default function StockPage() {
     setDeleteByTextBusy(true);
     try {
       if (deleteByTextPlan.ids.length) {
-        await supabase.from("stock").delete().in("id", deleteByTextPlan.ids);
+        await adminApiRequest("/api/admin/stock", {
+          method: "POST",
+          body: JSON.stringify({
+            action: "bulk_delete",
+            ids: deleteByTextPlan.ids
+          })
+        });
       }
+      setStockMutationMessage(`Đã xóa ${deleteByTextPlan.ids.length.toLocaleString("vi-VN")} stock theo nội dung.`);
       setDeleteByTextOpen(false);
       setDeleteByTextPlan(null);
       setDeleteContent("");
@@ -521,10 +569,21 @@ export default function StockPage() {
     if (!editingStock) return;
     const cleaned = editContent.trim();
     if (!cleaned) return;
-    await supabase
-      .from("stock")
-      .update({ content: cleaned, sold: editSold })
-      .eq("id", editingStock.id);
+    try {
+      await adminApiRequest("/api/admin/stock", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "update_one",
+          stockId: editingStock.id,
+          content: cleaned,
+          sold: editSold
+        })
+      });
+      setStockMutationMessage(`Đã cập nhật stock #${editingStock.id}.`);
+    } catch (error) {
+      setStockMutationMessage(error instanceof Error ? error.message : "Không thể cập nhật stock.");
+      return;
+    }
     cancelEdit();
     await loadStockSummary(selectedProductId);
     await loadStock(selectedProductId, page);
@@ -532,7 +591,19 @@ export default function StockPage() {
 
   const handleDeleteConfirm = async () => {
     if (!deleteStock) return;
-    await supabase.from("stock").delete().eq("id", deleteStock.id);
+    try {
+      await adminApiRequest("/api/admin/stock", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "delete_one",
+          stockId: deleteStock.id
+        })
+      });
+      setStockMutationMessage(`Đã xóa stock #${deleteStock.id}.`);
+    } catch (error) {
+      setStockMutationMessage(error instanceof Error ? error.message : "Không thể xóa stock.");
+      return;
+    }
     await loadStockSummary(selectedProductId);
     const shouldGoPrev = stockItems.length === 1 && page > 1;
     setDeleteStock(null);
@@ -693,8 +764,13 @@ export default function StockPage() {
     try {
       for (let i = 0; i < targetIds.length; i += 500) {
         const chunk = targetIds.slice(i, i + 500);
-        const { error } = await supabase.from("stock").delete().in("id", chunk);
-        if (error) throw error;
+        await adminApiRequest("/api/admin/stock", {
+          method: "POST",
+          body: JSON.stringify({
+            action: "bulk_delete",
+            ids: chunk
+          })
+        });
       }
 
       setSelectedStockIds((prev) => {
@@ -726,7 +802,31 @@ export default function StockPage() {
           <h1 className="page-title">Stock</h1>
           <p className="muted">Quản lý kho sản phẩm.</p>
         </div>
+        <div className="page-actions">
+          <button
+            className="button"
+            type="button"
+            disabled={!selectedProductId}
+            onClick={() => setStockActionPanelOpen((value) => !value)}
+          >
+            {stockActionPanelOpen ? "Đóng nhập/xóa" : "Nhập/Xóa stock"}
+          </button>
+          <button
+            className="button secondary"
+            type="button"
+            disabled={!selectedProductId}
+            onClick={() => setCustomCheckPanelOpen((value) => !value)}
+          >
+            {customCheckPanelOpen ? "Đóng custom check" : "Custom check"}
+          </button>
+        </div>
       </div>
+
+      {stockMutationMessage && (
+        <div className="card compact-card">
+          <p className="muted">{stockMutationMessage}</p>
+        </div>
+      )}
 
       <div className="card">
         <h3 className="section-title">Chọn sản phẩm</h3>
@@ -787,8 +887,17 @@ export default function StockPage() {
         )}
       </div>
 
-      <div className="card">
-        <h3 className="section-title">Thêm stock mới</h3>
+      {stockActionPanelOpen && (
+        <div className="card action-panel">
+          <div className="section-head">
+            <div>
+              <h3 className="section-title">Nhập/Xóa stock</h3>
+              <p className="muted">Các thao tác nhập hàng và xóa theo nội dung chỉ mở khi cần xử lý.</p>
+            </div>
+            <button className="button secondary" type="button" onClick={() => setStockActionPanelOpen(false)}>
+              Đóng
+            </button>
+          </div>
         <div className="segmented" role="tablist" aria-label="Stock form" style={{ marginBottom: 12 }}>
           <button
             type="button"
@@ -851,13 +960,22 @@ export default function StockPage() {
             )}
           </form>
         )}
-      </div>
+        </div>
+      )}
 
-      <div className="card">
-        <h3 className="section-title">Custom check</h3>
-        <p className="muted" style={{ marginBottom: 12 }}>
-          Logic giống <code>@email_inbox_extension</code>: lọc theo <code>Sender</code> và <code>Subject</code>.
-        </p>
+      {customCheckPanelOpen && (
+        <div className="card action-panel">
+          <div className="section-head">
+            <div>
+              <h3 className="section-title">Custom check</h3>
+              <p className="muted">
+                Logic giống <code>@email_inbox_extension</code>: lọc theo <code>Sender</code> và <code>Subject</code>.
+              </p>
+            </div>
+            <button className="button secondary" type="button" onClick={() => setCustomCheckPanelOpen(false)}>
+              Đóng
+            </button>
+          </div>
         <div className="form-grid">
           <div>
             <label className="muted" style={{ display: "block", marginBottom: 6 }}>
@@ -1101,7 +1219,8 @@ export default function StockPage() {
             )}
           </div>
         )}
-      </div>
+        </div>
+      )}
 
       <div className="card">
         <h3 className="section-title">Danh sách stock</h3>

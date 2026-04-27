@@ -41,20 +41,43 @@ const TOGGLE_FIELDS = [
   { key: "show_support", label: 'Hiện "Hỗ trợ"' },
 ];
 const TOGGLE_KEYS = TOGGLE_FIELDS.map((field) => field.key);
+const SECRET_SETTING_KEYS = new Set([
+  "sepay_token",
+  "binance_api_key",
+  "binance_api_secret",
+  "payment_notify_bot_token"
+]);
+
+const getSecretPlaceholder = (key: string, secretPresent: Record<string, boolean>, fallback: string) =>
+  secretPresent[key] ? "Đã lưu - nhập giá trị mới nếu muốn đổi" : fallback;
 
 export default function SettingsPage() {
   const [values, setValues] = useState<Record<string, string>>({});
+  const [secretPresent, setSecretPresent] = useState<Record<string, boolean>>({});
+  const [status, setStatus] = useState<string | null>(null);
 
   const load = async () => {
-    const { data } = await supabase
-      .from("settings")
-      .select("key, value")
-      .in("key", SETTINGS_KEYS);
-    const map: Record<string, string> = {};
-    (data || []).forEach((row: any) => {
-      map[row.key] = row.value;
+    const token = (await supabase.auth.getSession()).data.session?.access_token;
+    if (!token) {
+      setStatus("Chưa đăng nhập.");
+      return;
+    }
+
+    const response = await fetch("/api/admin/settings", {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`
+      },
+      cache: "no-store"
     });
-    setValues(map);
+    const json = await response.json().catch(() => null);
+    if (!response.ok) {
+      setStatus(typeof json?.error === "string" ? json.error : "Không thể tải settings.");
+      return;
+    }
+
+    setValues((json?.data?.values ?? {}) as Record<string, string>);
+    setSecretPresent((json?.data?.secretPresent ?? {}) as Record<string, boolean>);
   };
 
   useEffect(() => {
@@ -67,19 +90,45 @@ export default function SettingsPage() {
 
   const saveSettings = async (event: React.FormEvent) => {
     event.preventDefault();
-    const payload = SETTINGS_KEYS.map((key) => {
+    const token = (await supabase.auth.getSession()).data.session?.access_token;
+    if (!token) {
+      setStatus("Chưa đăng nhập.");
+      return;
+    }
+
+    const settings = SETTINGS_KEYS.reduce<Record<string, string>>((acc, key) => {
       if (TOGGLE_KEYS.includes(key)) {
-        return { key, value: values[key] ?? "true" };
+        acc[key] = values[key] ?? "true";
+        return acc;
       }
       if (key === "shop_page_size") {
         const parsed = Number.parseInt(values[key] || "10", 10);
         const normalized = Number.isFinite(parsed) ? Math.min(50, Math.max(1, parsed)) : 10;
-        return { key, value: String(normalized) };
+        acc[key] = String(normalized);
+        return acc;
       }
-      const value = values[key] || "";
-      return { key, value };
+      if (SECRET_SETTING_KEYS.has(key) && !(values[key] || "").trim()) {
+        return acc;
+      }
+      acc[key] = values[key] || "";
+      return acc;
+    }, {});
+
+    const response = await fetch("/api/admin/settings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({ settings })
     });
-    await supabase.from("settings").upsert(payload);
+    const json = await response.json().catch(() => null);
+    if (!response.ok) {
+      setStatus(typeof json?.error === "string" ? json.error : "Không thể lưu settings.");
+      return;
+    }
+
+    setStatus("Đã lưu cấu hình.");
     await load();
   };
 
@@ -93,6 +142,7 @@ export default function SettingsPage() {
       </div>
 
       <div className="card">
+        {status && <p className="muted" style={{ marginTop: 0 }}>{status}</p>}
         <form className="form-grid" onSubmit={saveSettings}>
           <input
             className="input"
@@ -114,7 +164,8 @@ export default function SettingsPage() {
           />
           <input
             className="input"
-            placeholder="SePay token"
+            type="password"
+            placeholder={getSecretPlaceholder("sepay_token", secretPresent, "SePay token")}
             value={values.sepay_token || ""}
             onChange={(e) => updateField("sepay_token", e.target.value)}
           />
@@ -139,14 +190,15 @@ export default function SettingsPage() {
             </label>
             <input
               className="input"
-              placeholder="Binance API Key"
+              type="password"
+              placeholder={getSecretPlaceholder("binance_api_key", secretPresent, "Binance API Key")}
               value={values.binance_api_key || ""}
               onChange={(e) => updateField("binance_api_key", e.target.value)}
             />
             <input
               className="input"
               type="password"
-              placeholder="Binance API Secret"
+              placeholder={getSecretPlaceholder("binance_api_secret", secretPresent, "Binance API Secret")}
               value={values.binance_api_secret || ""}
               onChange={(e) => updateField("binance_api_secret", e.target.value)}
             />
@@ -188,7 +240,8 @@ export default function SettingsPage() {
             </p>
             <input
               className="input"
-              placeholder="Bot_Token nhận thông báo"
+              type="password"
+              placeholder={getSecretPlaceholder("payment_notify_bot_token", secretPresent, "Bot_Token nhận thông báo")}
               value={values.payment_notify_bot_token || ""}
               onChange={(e) => updateField("payment_notify_bot_token", e.target.value)}
             />

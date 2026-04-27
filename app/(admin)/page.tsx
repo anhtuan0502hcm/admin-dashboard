@@ -7,20 +7,27 @@ import {
   type DashboardSnapshot,
   type DashboardStats
 } from "@/lib/adminAnalyticsClient";
+import { PageHeader, StatusPill } from "@/components/AdminUi";
+import { fetchAdminOpsHealth, type AdminOpsHealth } from "@/lib/adminOpsClient";
 
 export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats>({ users: 0, orders: 0, revenue: 0 });
   const [orders, setOrders] = useState<DashboardOrderRow[]>([]);
   const [pendingDeposits, setPendingDeposits] = useState(0);
   const [pendingWithdrawals, setPendingWithdrawals] = useState(0);
+  const [health, setHealth] = useState<AdminOpsHealth | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const loadDashboard = async () => {
-    const snapshot: DashboardSnapshot = await fetchDashboardSnapshot();
+    const [snapshot, healthSnapshot]: [DashboardSnapshot, AdminOpsHealth | null] = await Promise.all([
+      fetchDashboardSnapshot(),
+      fetchAdminOpsHealth(5).catch(() => null)
+    ]);
     setStats(snapshot.stats);
     setOrders(snapshot.orders);
     setPendingDeposits(snapshot.pendingDeposits);
     setPendingWithdrawals(snapshot.pendingWithdrawals);
+    setHealth(healthSnapshot);
     setLoadError(null);
   };
 
@@ -48,13 +55,11 @@ export default function DashboardPage() {
 
   return (
     <div className="grid" style={{ gap: 24 }}>
-      <div className="topbar">
-        <div>
-          <h1 className="page-title">Tổng quan</h1>
-          <p className="muted">Tổng quan hiệu suất shop hôm nay.</p>
-        </div>
-        <div className="badge">Live Supabase</div>
-      </div>
+      <PageHeader
+        title="Tổng quan"
+        description="Tổng quan hiệu suất shop và trạng thái vận hành Bot."
+        actions={<div className="badge">Live Supabase</div>}
+      />
 
       {loadError && (
         <div className="card" style={{ border: "1px solid #b91c1c" }}>
@@ -93,6 +98,32 @@ export default function DashboardPage() {
           </h2>
         </div>
       </div>
+
+      {health && (
+        <div className="grid stats">
+          <div className="card compact-card">
+            <p className="muted">Direct quá hạn</p>
+            <h2>{health.queues.pendingDirectOrdersExpired}</h2>
+            <StatusPill tone={health.queues.pendingDirectOrdersExpired ? "danger" : "success"}>
+              pending payment
+            </StatusPill>
+          </div>
+          <div className="card compact-card">
+            <p className="muted">Outbox lỗi</p>
+            <h2>{health.queues.deliveryOutbox.failed}</h2>
+            <StatusPill tone={health.queues.deliveryOutbox.failed ? "danger" : "success"}>
+              delivery
+            </StatusPill>
+          </div>
+          <div className="card compact-card">
+            <p className="muted">Low stock</p>
+            <h2>{health.stock.count}</h2>
+            <StatusPill tone={health.stock.count ? "warning" : "success"}>
+              {"ngưỡng <= "} {health.stock.threshold}
+            </StatusPill>
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <h3 className="section-title">Đơn hàng gần nhất</h3>

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
+import { adminApiRequest } from "@/lib/adminOpsClient";
 import { useAdminSession } from "@/components/AdminSessionContext";
 
 interface PriceTier {
@@ -19,6 +20,8 @@ interface Product {
   id: number;
   sort_position: number | null;
   bot_folder_id: number | null;
+  telegram_icon: string | null;
+  telegram_icon_custom_emoji_id: string | null;
   name: string;
   price: number;
   price_usdt: number;
@@ -91,6 +94,22 @@ const parseOptionalFolderId = (value: string): number | null => {
   return parsed;
 };
 
+const normalizeTelegramIcon = (value: string): string | null => {
+  const normalized = value.replace(/\s+/g, " ").trim().slice(0, 16);
+  return normalized || null;
+};
+
+const normalizeTelegramCustomEmojiId = (value: string): string | null => {
+  const normalized = value.replace(/\D/g, "").slice(0, 64);
+  return normalized || null;
+};
+
+const shortenCustomEmojiId = (value: string | null): string => {
+  if (!value) return "-";
+  if (value.length <= 14) return value;
+  return `${value.slice(0, 8)}…${value.slice(-4)}`;
+};
+
 const createTierRow = (tier?: PriceTier): PriceTierRow => ({
   id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
   minQuantity: tier?.min_quantity ? String(tier.min_quantity) : "",
@@ -138,6 +157,9 @@ export default function ProductsPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [folders, setFolders] = useState<BotFolder[]>([]);
   const [productListTab, setProductListTab] = useState<ProductListTab>("visible");
+  const [createProductOpen, setCreateProductOpen] = useState(false);
+  const [folderCreateOpen, setFolderCreateOpen] = useState(false);
+  const [templateCreateOpen, setTemplateCreateOpen] = useState(false);
   const [formatTemplates, setFormatTemplates] = useState<FormatTemplate[]>([]);
   const [productError, setProductError] = useState<string | null>(null);
   const [folderError, setFolderError] = useState<string | null>(null);
@@ -148,6 +170,8 @@ export default function ProductsPage() {
   const [priceUsdt, setPriceUsdt] = useState("");
   const [sortPosition, setSortPosition] = useState("");
   const [botFolderId, setBotFolderId] = useState("");
+  const [telegramIcon, setTelegramIcon] = useState("");
+  const [telegramIconCustomEmojiId, setTelegramIconCustomEmojiId] = useState("");
   const [description, setDescription] = useState("");
   const [formatData, setFormatData] = useState("");
   const [priceTierRows, setPriceTierRows] = useState<PriceTierRow[]>([createTierRow()]);
@@ -163,6 +187,8 @@ export default function ProductsPage() {
   const [editPriceUsdt, setEditPriceUsdt] = useState("");
   const [editSortPosition, setEditSortPosition] = useState("");
   const [editBotFolderId, setEditBotFolderId] = useState("");
+  const [editTelegramIcon, setEditTelegramIcon] = useState("");
+  const [editTelegramIconCustomEmojiId, setEditTelegramIconCustomEmojiId] = useState("");
   const [editDescription, setEditDescription] = useState("");
   const [editFormatData, setEditFormatData] = useState("");
   const [editPriceTierRows, setEditPriceTierRows] = useState<PriceTierRow[]>([createTierRow()]);
@@ -180,9 +206,29 @@ export default function ProductsPage() {
   const load = async () => {
     const { data, error } = await supabase
       .from("products")
-      .select("id, sort_position, bot_folder_id, name, price, price_usdt, price_tiers, promo_buy_quantity, promo_bonus_quantity, description, format_data, is_hidden, is_deleted")
+      .select("id, sort_position, bot_folder_id, telegram_icon, telegram_icon_custom_emoji_id, name, price, price_usdt, price_tiers, promo_buy_quantity, promo_bonus_quantity, description, format_data, is_hidden, is_deleted")
       .order("id");
     if (error) {
+      const withoutCustomEmojiFallback = await supabase
+        .from("products")
+        .select("id, sort_position, bot_folder_id, telegram_icon, name, price, price_usdt, price_tiers, promo_buy_quantity, promo_bonus_quantity, description, format_data, is_hidden, is_deleted")
+        .order("id");
+      if (!withoutCustomEmojiFallback.error) {
+        setProductError("Thiếu cột telegram_icon_custom_emoji_id trong products. Hãy chạy lại supabase_schema_all_in_one.sql để bật Telegram custom emoji icon.");
+        setProducts(
+          ((withoutCustomEmojiFallback.data as Product[]) || []).map((row) => ({
+            ...row,
+            sort_position: row.sort_position !== null && row.sort_position !== undefined ? Number(row.sort_position) : null,
+            bot_folder_id: row.bot_folder_id !== null && row.bot_folder_id !== undefined ? Number(row.bot_folder_id) : null,
+            telegram_icon: row.telegram_icon ?? null,
+            telegram_icon_custom_emoji_id: null,
+            is_hidden: Boolean((row as any).is_hidden),
+            is_deleted: Boolean((row as any).is_deleted)
+          }))
+        );
+        return;
+      }
+
       const withFolderFallback = await supabase
         .from("products")
         .select("id, sort_position, name, price, price_usdt, price_tiers, promo_buy_quantity, promo_bonus_quantity, description, format_data, is_hidden, is_deleted")
@@ -194,6 +240,8 @@ export default function ProductsPage() {
             ...row,
             sort_position: row.sort_position !== null && row.sort_position !== undefined ? Number(row.sort_position) : null,
             bot_folder_id: null,
+            telegram_icon: null,
+            telegram_icon_custom_emoji_id: null,
             is_hidden: Boolean((row as any).is_hidden),
             is_deleted: Boolean((row as any).is_deleted)
           }))
@@ -212,6 +260,8 @@ export default function ProductsPage() {
             ...row,
             sort_position: null,
             bot_folder_id: null,
+            telegram_icon: null,
+            telegram_icon_custom_emoji_id: null,
             is_hidden: Boolean((row as any).is_hidden),
             is_deleted: Boolean((row as any).is_deleted)
           }))
@@ -233,6 +283,8 @@ export default function ProductsPage() {
           ...row,
           sort_position: null,
           bot_folder_id: null,
+          telegram_icon: null,
+          telegram_icon_custom_emoji_id: null,
           is_hidden: false,
           is_deleted: false
         }))
@@ -245,6 +297,8 @@ export default function ProductsPage() {
         ...row,
         sort_position: row.sort_position !== null && row.sort_position !== undefined ? Number(row.sort_position) : null,
         bot_folder_id: row.bot_folder_id !== null && row.bot_folder_id !== undefined ? Number(row.bot_folder_id) : null,
+        telegram_icon: row.telegram_icon ?? null,
+        telegram_icon_custom_emoji_id: row.telegram_icon_custom_emoji_id ?? null,
         is_hidden: Boolean((row as any).is_hidden),
         is_deleted: Boolean((row as any).is_deleted)
       }))
@@ -527,6 +581,8 @@ export default function ProductsPage() {
       price_usdt: parseFloat(priceUsdt || "0"),
       sort_position: parsedSortPosition.value,
       bot_folder_id: parseOptionalFolderId(botFolderId),
+      telegram_icon: normalizeTelegramIcon(telegramIcon),
+      telegram_icon_custom_emoji_id: normalizeTelegramCustomEmojiId(telegramIconCustomEmojiId),
       description,
       format_data: formatData || null,
       price_tiers: tiers.length ? tiers : null,
@@ -542,6 +598,8 @@ export default function ProductsPage() {
           ? "Thiếu cột sort_position trong products. Hãy chạy SQL migration position mới."
           : error.message.includes("bot_folder_id")
           ? "Thiếu cột bot_folder_id trong products. Hãy chạy SQL migration folder sản phẩm mới."
+          : error.message.includes("telegram_icon")
+          ? "Thiếu cột Icon Telegram trong products. Hãy chạy lại supabase_schema_all_in_one.sql."
           : error.message
       );
       return;
@@ -552,29 +610,34 @@ export default function ProductsPage() {
     setPriceUsdt("");
     setSortPosition("");
     setBotFolderId("");
+    setTelegramIcon("");
+    setTelegramIconCustomEmojiId("");
     setDescription("");
     setFormatData("");
     setPriceTierRows([createTierRow()]);
     setPromoBuyQuantity("");
     setPromoBonusQuantity("");
+    setCreateProductOpen(false);
     await load();
   };
 
   const handleDeleteConfirm = async () => {
     if (!deleteProduct) return;
-    const { error } = await supabase
-      .from("products")
-      .update({
-        is_deleted: true,
-        is_hidden: true,
-        deleted_at: new Date().toISOString()
-      })
-      .eq("id", deleteProduct.id);
-    if (error) {
+    try {
+      await adminApiRequest("/api/admin/products", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "soft_delete",
+          productId: deleteProduct.id
+        })
+      });
+    } catch (error) {
       setProductError(
-        error.message.includes("is_deleted") || error.message.includes("deleted_at")
+        error instanceof Error && (error.message.includes("is_deleted") || error.message.includes("deleted_at"))
           ? "Thiếu cột soft-delete trong products. Hãy chạy SQL migration mới."
-          : error.message
+          : error instanceof Error
+          ? error.message
+          : "Không thể xóa mềm sản phẩm."
       );
       return;
     }
@@ -584,15 +647,22 @@ export default function ProductsPage() {
 
   const handleToggleHidden = async (product: Product) => {
     if (product.is_deleted) return;
-    const { error } = await supabase
-      .from("products")
-      .update({ is_hidden: !product.is_hidden })
-      .eq("id", product.id);
-    if (error) {
+    try {
+      await adminApiRequest("/api/admin/products", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "toggle_hidden",
+          productId: product.id,
+          hidden: !product.is_hidden
+        })
+      });
+    } catch (error) {
       setProductError(
-        error.message.includes("is_hidden")
+        error instanceof Error && error.message.includes("is_hidden")
           ? "Thiếu cột is_hidden trong products. Hãy chạy SQL migration soft-delete mới."
-          : error.message
+          : error instanceof Error
+          ? error.message
+          : "Không thể cập nhật trạng thái ẩn."
       );
       return;
     }
@@ -600,19 +670,21 @@ export default function ProductsPage() {
   };
 
   const handleRestore = async (product: Product) => {
-    const { error } = await supabase
-      .from("products")
-      .update({
-        is_deleted: false,
-        is_hidden: false,
-        deleted_at: null
-      })
-      .eq("id", product.id);
-    if (error) {
+    try {
+      await adminApiRequest("/api/admin/products", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "restore",
+          productId: product.id
+        })
+      });
+    } catch (error) {
       setProductError(
-        error.message.includes("is_deleted") || error.message.includes("deleted_at")
+        error instanceof Error && (error.message.includes("is_deleted") || error.message.includes("deleted_at"))
           ? "Thiếu cột soft-delete trong products. Hãy chạy SQL migration mới."
-          : error.message
+          : error instanceof Error
+          ? error.message
+          : "Không thể khôi phục sản phẩm."
       );
       return;
     }
@@ -626,6 +698,8 @@ export default function ProductsPage() {
     setEditPriceUsdt(product.price_usdt?.toString() ?? "");
     setEditSortPosition(product.sort_position !== null && product.sort_position !== undefined ? String(product.sort_position) : "");
     setEditBotFolderId(product.bot_folder_id !== null && product.bot_folder_id !== undefined ? String(product.bot_folder_id) : "");
+    setEditTelegramIcon(product.telegram_icon ?? "");
+    setEditTelegramIconCustomEmojiId(product.telegram_icon_custom_emoji_id ?? "");
     setEditDescription(product.description ?? "");
     setEditFormatData(product.format_data ?? "");
     setEditPriceTierRows(parseTierRows(product.price_tiers));
@@ -640,6 +714,8 @@ export default function ProductsPage() {
     setEditPriceUsdt("");
     setEditSortPosition("");
     setEditBotFolderId("");
+    setEditTelegramIcon("");
+    setEditTelegramIconCustomEmojiId("");
     setEditDescription("");
     setEditFormatData("");
     setEditPriceTierRows([createTierRow()]);
@@ -697,30 +773,23 @@ export default function ProductsPage() {
   const handleDeleteFolderConfirm = async () => {
     if (!deleteFolder) return;
 
-    const { error: unassignError } = await supabase
-      .from("products")
-      .update({ bot_folder_id: null })
-      .eq("bot_folder_id", deleteFolder.id);
-
-    if (unassignError) {
+    try {
+      await adminApiRequest("/api/admin/products", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "delete_folder",
+          folderId: deleteFolder.id
+        })
+      });
+    } catch (error) {
       setFolderError(
-        unassignError.message.includes("bot_folder_id")
-          ? "Thiếu cột bot_folder_id trong products. Hãy chạy SQL migration folder sản phẩm mới."
-          : unassignError.message
-      );
-      return;
-    }
-
-    const { error } = await supabase
-      .from("bot_product_folders")
-      .delete()
-      .eq("id", deleteFolder.id);
-
-    if (error) {
-      setFolderError(
-        error.message.includes("bot_product_folders")
+        error instanceof Error && error.message.includes("bot_product_folders")
           ? "Thiếu bảng bot_product_folders. Hãy chạy SQL migration folder sản phẩm mới."
-          : error.message
+          : error instanceof Error && error.message.includes("bot_folder_id")
+          ? "Thiếu cột bot_folder_id trong products. Hãy chạy SQL migration folder sản phẩm mới."
+          : error instanceof Error
+          ? error.message
+          : "Không thể xóa folder."
       );
       return;
     }
@@ -755,6 +824,8 @@ export default function ProductsPage() {
         price_usdt: parseFloat(editPriceUsdt || "0"),
         sort_position: parsedSortPosition.value,
         bot_folder_id: parseOptionalFolderId(editBotFolderId),
+        telegram_icon: normalizeTelegramIcon(editTelegramIcon),
+        telegram_icon_custom_emoji_id: normalizeTelegramCustomEmojiId(editTelegramIconCustomEmojiId),
         description: editDescription,
         format_data: editFormatData || null,
         price_tiers: tiers.length ? tiers : null,
@@ -768,6 +839,8 @@ export default function ProductsPage() {
           ? "Thiếu cột sort_position trong products. Hãy chạy SQL migration position mới."
           : error.message.includes("bot_folder_id")
           ? "Thiếu cột bot_folder_id trong products. Hãy chạy SQL migration folder sản phẩm mới."
+          : error.message.includes("telegram_icon")
+          ? "Thiếu cột Icon Telegram trong products. Hãy chạy lại supabase_schema_all_in_one.sql."
           : error.message
       );
       return;
@@ -795,6 +868,7 @@ export default function ProductsPage() {
     }
     setTemplateName("");
     setTemplatePattern("");
+    setTemplateCreateOpen(false);
     await loadFormats();
   };
 
@@ -848,29 +922,53 @@ export default function ProductsPage() {
           <h1 className="page-title">Products</h1>
           <p className="muted">Quản lý danh sách sản phẩm, giá bán và Banner Hàng hóa theo từng Product.</p>
         </div>
+        <div className="page-actions">
+          <button className="button" type="button" onClick={() => setCreateProductOpen(true)}>
+            Thêm sản phẩm
+          </button>
+          <button className="button secondary" type="button" onClick={() => setFolderCreateOpen((value) => !value)}>
+            {folderCreateOpen ? "Đóng folder" : "Quản lý folder"}
+          </button>
+          {adminSession?.role === "superadmin" && (
+            <button className="button secondary" type="button" onClick={() => setTemplateCreateOpen((value) => !value)}>
+              {templateCreateOpen ? "Đóng format" : "Format templates"}
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="card">
-        <h3 className="section-title">Folder sản phẩm Bot</h3>
-        <p className="muted" style={{ marginBottom: 12 }}>
-          Folder chỉ áp dụng cho Telegram Bot. Xóa folder sẽ không xóa sản phẩm, chỉ đưa sản phẩm về danh sách top-level.
-        </p>
-        <form className="form-grid" onSubmit={handleAddFolder}>
-          <input
-            className="input"
-            placeholder="Tên folder Bot"
-            value={folderName}
-            onChange={(e) => setFolderName(e.target.value)}
-            required
-          />
-          <input
-            className="input"
-            placeholder="Vị trí folder (VD: 1, 2, 3)"
-            value={folderSortPosition}
-            onChange={(e) => setFolderSortPosition(e.target.value)}
-          />
-          <button className="button" type="submit">Thêm folder</button>
-        </form>
+        <div className="section-head">
+          <div>
+            <h3 className="section-title">Folder sản phẩm Bot</h3>
+            <p className="muted">
+              Folder chỉ áp dụng cho Telegram Bot. Xóa folder sẽ không xóa sản phẩm, chỉ đưa sản phẩm về danh sách top-level.
+            </p>
+          </div>
+          <button className="button secondary" type="button" onClick={() => setFolderCreateOpen((value) => !value)}>
+            {folderCreateOpen ? "Đóng" : "Thêm folder"}
+          </button>
+        </div>
+        {folderCreateOpen && (
+          <div className="action-panel">
+            <form className="form-grid" onSubmit={handleAddFolder}>
+              <input
+                className="input"
+                placeholder="Tên folder Bot"
+                value={folderName}
+                onChange={(e) => setFolderName(e.target.value)}
+                required
+              />
+              <input
+                className="input"
+                placeholder="Vị trí folder (VD: 1, 2, 3)"
+                value={folderSortPosition}
+                onChange={(e) => setFolderSortPosition(e.target.value)}
+              />
+              <button className="button" type="submit">Thêm folder</button>
+            </form>
+          </div>
+        )}
         {folderError && (
           <p className="muted" style={{ marginTop: 8 }}>
             Lỗi: {folderError}
@@ -914,103 +1012,136 @@ export default function ProductsPage() {
         </table>
       </div>
 
-      <div className="card">
-        <h3 className="section-title">Thêm sản phẩm mới</h3>
-        <form className="form-grid" onSubmit={handleAdd}>
-          <input className="input" placeholder="Tên sản phẩm" value={name} onChange={(e) => setName(e.target.value)} required />
-          <input className="input" placeholder="Giá (VND)" value={price} onChange={(e) => setPrice(e.target.value)} required />
-          <input className="input" placeholder="Giá (USDT)" value={priceUsdt} onChange={(e) => setPriceUsdt(e.target.value)} />
-          <input className="input" placeholder="Vị trí trên Bot (VD: 1, 2, 3)" value={sortPosition} onChange={(e) => setSortPosition(e.target.value)} />
-          <select
-            className="select"
-            value={botFolderId}
-            onChange={(e) => setBotFolderId(e.target.value)}
-          >
-            <option value="">Không gán folder Bot</option>
-            {folderOptions.map((folder) => (
-              <option key={folder.id} value={folder.id}>
-                {folder.name}
-              </option>
-            ))}
-          </select>
-          <select
-            className="select"
-            value=""
-            onChange={(e) => setFormatData(e.target.value)}
-          >
-            <option value="">Chọn format mẫu (tự điền vào Format data)</option>
-            {formatTemplates.map((format) => (
-              <option key={format.id} value={format.pattern}>
-                {format.name} | {format.pattern}
-              </option>
-            ))}
-          </select>
-          <input
-            className="input"
-            placeholder="Format data (VD: Mail,Pass,Token)"
-            value={formatData}
-            onChange={(e) => setFormatData(e.target.value)}
-          />
-          <textarea
-            className="textarea form-section"
-            placeholder="Mô tả (gửi trước Account sau thanh toán)"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-          <div className="form-section pricing-box">
-            <div className="pricing-head">
-              <h4>Giá theo số lượng (VND)</h4>
-              <button className="button secondary" type="button" onClick={addTierRow}>+ Thêm mức</button>
+      {createProductOpen && (
+        <div className="card action-panel">
+          <div className="section-head">
+            <div>
+              <h3 className="section-title">Thêm sản phẩm mới</h3>
+              <p className="muted">Chỉ mở form khi cần tạo mới để giữ trang sản phẩm dễ quét.</p>
             </div>
-            <p className="muted">Nhập mốc số lượng và đơn giá mỗi account. Hệ thống tự lấy mốc cao nhất phù hợp.</p>
-            <div className="tier-list">
-              {priceTierRows.map((row) => (
-                <div className="tier-row" key={row.id}>
-                  <input
-                    className="input"
-                    placeholder="Từ số lượng (VD: 10)"
-                    value={row.minQuantity}
-                    onChange={(event) => updateTierRow(row.id, "minQuantity", event.target.value)}
-                  />
-                  <input
-                    className="input"
-                    placeholder="Đơn giá VND (VD: 15000)"
-                    value={row.unitPrice}
-                    onChange={(event) => updateTierRow(row.id, "unitPrice", event.target.value)}
-                  />
-                  <button className="button secondary" type="button" onClick={() => removeTierRow(row.id)}>Xóa</button>
-                </div>
+            <button className="button secondary" type="button" onClick={() => setCreateProductOpen(false)}>
+              Đóng
+            </button>
+          </div>
+          <form className="form-grid" onSubmit={handleAdd}>
+            <input className="input" placeholder="Tên sản phẩm" value={name} onChange={(e) => setName(e.target.value)} required />
+            <input
+              className="input"
+              placeholder="Emoji fallback (VD: 🤖, 📦, ✨)"
+              value={telegramIcon}
+              onChange={(e) => setTelegramIcon(e.target.value)}
+              maxLength={16}
+            />
+            <input
+              className="input"
+              inputMode="numeric"
+              placeholder="Custom emoji ID Telegram (VD: 5368324170671202286)"
+              value={telegramIconCustomEmojiId}
+              onChange={(e) => setTelegramIconCustomEmojiId(e.target.value.replace(/\D/g, "").slice(0, 64))}
+              maxLength={64}
+            />
+            <input className="input" placeholder="Giá (VND)" value={price} onChange={(e) => setPrice(e.target.value)} required />
+            <input className="input" placeholder="Giá (USDT)" value={priceUsdt} onChange={(e) => setPriceUsdt(e.target.value)} />
+            <input className="input" placeholder="Vị trí trên Bot (VD: 1, 2, 3)" value={sortPosition} onChange={(e) => setSortPosition(e.target.value)} />
+            <select
+              className="select"
+              value={botFolderId}
+              onChange={(e) => setBotFolderId(e.target.value)}
+            >
+              <option value="">Không gán folder Bot</option>
+              {folderOptions.map((folder) => (
+                <option key={folder.id} value={folder.id}>
+                  {folder.name}
+                </option>
               ))}
+            </select>
+            <select
+              className="select"
+              value=""
+              onChange={(e) => setFormatData(e.target.value)}
+            >
+              <option value="">Chọn format mẫu (tự điền vào Format data)</option>
+              {formatTemplates.map((format) => (
+                <option key={format.id} value={format.pattern}>
+                  {format.name} | {format.pattern}
+                </option>
+              ))}
+            </select>
+            <input
+              className="input"
+              placeholder="Format data (VD: Mail,Pass,Token)"
+              value={formatData}
+              onChange={(e) => setFormatData(e.target.value)}
+            />
+            <textarea
+              className="textarea form-section"
+              placeholder="Mô tả (gửi trước Account sau thanh toán)"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+            <div className="form-section pricing-box">
+              <div className="pricing-head">
+                <h4>Giá theo số lượng (VND)</h4>
+                <button className="button secondary" type="button" onClick={addTierRow}>+ Thêm mức</button>
+              </div>
+              <p className="muted">Nhập mốc số lượng và đơn giá mỗi account. Hệ thống tự lấy mốc cao nhất phù hợp.</p>
+              <div className="tier-list">
+                {priceTierRows.map((row) => (
+                  <div className="tier-row" key={row.id}>
+                    <input
+                      className="input"
+                      placeholder="Từ số lượng (VD: 10)"
+                      value={row.minQuantity}
+                      onChange={(event) => updateTierRow(row.id, "minQuantity", event.target.value)}
+                    />
+                    <input
+                      className="input"
+                      placeholder="Đơn giá VND (VD: 15000)"
+                      value={row.unitPrice}
+                      onChange={(event) => updateTierRow(row.id, "unitPrice", event.target.value)}
+                    />
+                    <button className="button secondary" type="button" onClick={() => removeTierRow(row.id)}>Xóa</button>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
-          <div className="form-section promo-row">
-            <input
-              className="input"
-              placeholder="Khuyến mãi: mua X (VD: 10)"
-              value={promoBuyQuantity}
-              onChange={(event) => setPromoBuyQuantity(event.target.value)}
-            />
-            <input
-              className="input"
-              placeholder="Khuyến mãi: tặng Y (VD: 1)"
-              value={promoBonusQuantity}
-              onChange={(event) => setPromoBonusQuantity(event.target.value)}
-            />
-          </div>
-          <button className="button" type="submit">Thêm</button>
-        </form>
-        {productError && (
-          <p className="muted" style={{ marginTop: 8 }}>
-            Lỗi: {productError}
-          </p>
-        )}
-      </div>
+            <div className="form-section promo-row">
+              <input
+                className="input"
+                placeholder="Khuyến mãi: mua X (VD: 10)"
+                value={promoBuyQuantity}
+                onChange={(event) => setPromoBuyQuantity(event.target.value)}
+              />
+              <input
+                className="input"
+                placeholder="Khuyến mãi: tặng Y (VD: 1)"
+                value={promoBonusQuantity}
+                onChange={(event) => setPromoBonusQuantity(event.target.value)}
+              />
+            </div>
+            <div className="modal-actions">
+              <button className="button" type="submit">Thêm sản phẩm</button>
+              <button className="button secondary" type="button" onClick={() => setCreateProductOpen(false)}>Hủy</button>
+            </div>
+          </form>
+          {productError && (
+            <p className="muted" style={{ marginTop: 8 }}>
+              Lỗi: {productError}
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="card">
         <h3 className="section-title">Danh sách sản phẩm</h3>
         <p className="muted" style={{ marginBottom: 10 }}>
           Bot sẽ ưu tiên sắp xếp theo cột <strong>Vị trí</strong> tăng dần. Để trống sẽ xếp sau theo ID.
         </p>
+        {productError && !createProductOpen && (
+          <p className="muted" style={{ marginBottom: 10, color: "var(--danger)" }}>
+            Lỗi: {productError}
+          </p>
+        )}
         <div className="segmented" style={{ marginBottom: 12 }}>
           <button
             className={`segmented-button ${productListTab === "visible" ? "active" : ""}`}
@@ -1040,6 +1171,8 @@ export default function ProductsPage() {
               <th>ID</th>
               <th>Vị trí</th>
               <th>Folder Bot</th>
+              <th>Fallback</th>
+              <th>Custom emoji ID</th>
               <th>Tên</th>
               <th>Giá (VND)</th>
               <th>Giá (USDT)</th>
@@ -1059,6 +1192,10 @@ export default function ProductsPage() {
                   {product.bot_folder_id !== null
                     ? folderNameById.get(product.bot_folder_id) ?? `#${product.bot_folder_id}`
                     : "-"}
+                </td>
+                <td>{product.telegram_icon || "📦"}</td>
+                <td title={product.telegram_icon_custom_emoji_id || ""}>
+                  {shortenCustomEmojiId(product.telegram_icon_custom_emoji_id)}
                 </td>
                 <td>{product.name}</td>
                 <td>{product.price.toLocaleString()}</td>
@@ -1105,7 +1242,7 @@ export default function ProductsPage() {
             ))}
             {!listedProducts.length && (
               <tr>
-                <td colSpan={11} className="muted">
+                <td colSpan={13} className="muted">
                   {productListTab === "hidden"
                     ? "Chưa có sản phẩm đang ẩn."
                     : productListTab === "deleted"
@@ -1118,28 +1255,40 @@ export default function ProductsPage() {
         </table>
       </div>
 
-              {adminSession?.role === "superadmin" && (
+      {adminSession?.role === "superadmin" && (
         <div className="card">
-          <h3 className="section-title">Format templates</h3>
-          <form className="form-grid" onSubmit={handleAddTemplate}>
-            <input
-              className="input"
-              placeholder="Tên format (VD: Adobe)"
-              value={templateName}
-              onChange={(e) => setTemplateName(e.target.value)}
-              required
-            />
-            <input
-              className="input"
-              placeholder="Format data (VD: Mail,Pass,Token)"
-              value={templatePattern}
-              onChange={(e) => setTemplatePattern(e.target.value)}
-              required
-            />
-            <button className="button" type="submit" disabled={templateSaving}>
-              {templateSaving ? "Đang thêm..." : "Thêm format"}
+          <div className="section-head">
+            <div>
+              <h3 className="section-title">Format templates</h3>
+              <p className="muted">Mẫu format dùng lại khi tạo hoặc chỉnh sửa sản phẩm.</p>
+            </div>
+            <button className="button secondary" type="button" onClick={() => setTemplateCreateOpen((value) => !value)}>
+              {templateCreateOpen ? "Đóng" : "Thêm format"}
             </button>
-          </form>
+          </div>
+          {templateCreateOpen && (
+            <div className="action-panel">
+              <form className="form-grid" onSubmit={handleAddTemplate}>
+                <input
+                  className="input"
+                  placeholder="Tên format (VD: Adobe)"
+                  value={templateName}
+                  onChange={(e) => setTemplateName(e.target.value)}
+                  required
+                />
+                <input
+                  className="input"
+                  placeholder="Format data (VD: Mail,Pass,Token)"
+                  value={templatePattern}
+                  onChange={(e) => setTemplatePattern(e.target.value)}
+                  required
+                />
+                <button className="button" type="submit" disabled={templateSaving}>
+                  {templateSaving ? "Đang thêm..." : "Thêm format"}
+                </button>
+              </form>
+            </div>
+          )}
           {templateError && (
             <p className="muted" style={{ marginTop: 8 }}>
               Lỗi: {templateError}
@@ -1182,6 +1331,21 @@ export default function ProductsPage() {
             <h3 className="section-title">Chỉnh sửa sản phẩm #{editingProduct.id}</h3>
             <form className="form-grid" onSubmit={handleUpdate}>
               <input className="input" placeholder="Tên sản phẩm" value={editName} onChange={(e) => setEditName(e.target.value)} required />
+              <input
+                className="input"
+                placeholder="Emoji fallback (VD: 🤖, 📦, ✨)"
+                value={editTelegramIcon}
+                onChange={(e) => setEditTelegramIcon(e.target.value)}
+                maxLength={16}
+              />
+              <input
+                className="input"
+                inputMode="numeric"
+                placeholder="Custom emoji ID Telegram"
+                value={editTelegramIconCustomEmojiId}
+                onChange={(e) => setEditTelegramIconCustomEmojiId(e.target.value.replace(/\D/g, "").slice(0, 64))}
+                maxLength={64}
+              />
               <input className="input" placeholder="Giá (VND)" value={editPrice} onChange={(e) => setEditPrice(e.target.value)} required />
               <input className="input" placeholder="Giá (USDT)" value={editPriceUsdt} onChange={(e) => setEditPriceUsdt(e.target.value)} />
               <input className="input" placeholder="Vị trí trên Bot (để trống nếu không dùng)" value={editSortPosition} onChange={(e) => setEditSortPosition(e.target.value)} />

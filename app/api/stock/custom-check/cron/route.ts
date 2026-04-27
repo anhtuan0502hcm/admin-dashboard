@@ -6,7 +6,7 @@ import type { CustomCheckRequestBody } from "../shared";
 import { checkRateLimit, getClientIp } from "@/app/api/_shared/rateLimit";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY || "";
 const cronSecret = process.env.CRON_SECRET || "";
 
 const buildServiceClient = () =>
@@ -38,7 +38,7 @@ const safeSecretEquals = (provided: string, expected: string) =>
 export async function POST(request: NextRequest) {
   if (!supabaseUrl || !supabaseSecretKey) {
     return NextResponse.json(
-      { error: "Supabase env missing. Require NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY." },
+      { error: "Supabase env missing. Require NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SECRET_KEY." },
       { status: 500 }
     );
   }

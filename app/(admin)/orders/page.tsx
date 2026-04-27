@@ -12,10 +12,25 @@ interface OrderRow {
   created_at: string;
 }
 
+interface OrderUserLookupRow {
+  user_id: number | string;
+  username: string | null;
+  first_name: string | null;
+  last_name: string | null;
+}
+
+const buildDisplayName = (user: OrderUserLookupRow) =>
+  [user.first_name, user.last_name]
+    .map((part) => part?.trim())
+    .filter(Boolean)
+    .join(" ")
+    .trim() || null;
+
 export default function OrdersPage() {
   const PAGE_SIZE = 50;
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [usernamesByUserId, setUsernamesByUserId] = useState<Record<string, string | null>>({});
+  const [displayNamesByUserId, setDisplayNamesByUserId] = useState<Record<string, string | null>>({});
   const [productNamesById, setProductNamesById] = useState<Record<string, string>>({});
   const [page, setPage] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
@@ -53,19 +68,24 @@ export default function OrdersPage() {
 
     const [usersRes, productsRes] = await Promise.all([
       userIds.length
-        ? supabase.from("users").select("user_id, username").in("user_id", userIds)
-        : Promise.resolve({ data: [] as Array<{ user_id: number | string; username: string | null }> }),
+        ? supabase.from("users").select("user_id, username, first_name, last_name").in("user_id", userIds)
+        : Promise.resolve({
+            data: [] as OrderUserLookupRow[]
+          }),
       productIds.length
         ? supabase.from("products").select("id, name").in("id", productIds)
         : Promise.resolve({ data: [] as Array<{ id: number | string; name: string }> })
     ]);
 
     const usernames: Record<string, string | null> = {};
+    const displayNames: Record<string, string | null> = {};
     for (const user of usersRes.data ?? []) {
       if (user?.user_id === null || user?.user_id === undefined) continue;
       usernames[String(user.user_id)] = user.username ?? null;
+      displayNames[String(user.user_id)] = buildDisplayName(user);
     }
     setUsernamesByUserId(usernames);
+    setDisplayNamesByUserId(displayNames);
 
     const productNames: Record<string, string> = {};
     for (const product of productsRes.data ?? []) {
@@ -112,6 +132,7 @@ export default function OrdersPage() {
               <th>ID</th>
               <th>UserID</th>
               <th>Username</th>
+              <th>Tên người dùng</th>
               <th>Sản phẩm</th>
               <th>SL</th>
               <th>Giá</th>
@@ -124,6 +145,7 @@ export default function OrdersPage() {
                 <td>#{order.id}</td>
                 <td>{order.user_id}</td>
                 <td>{usernamesByUserId[String(order.user_id)] || "-"}</td>
+                <td>{displayNamesByUserId[String(order.user_id)] || "-"}</td>
                 <td>{productNamesById[String(order.product_id)] || order.product_id}</td>
                 <td>{order.quantity}</td>
                 <td>{order.price.toLocaleString("vi-VN")}</td>
@@ -132,7 +154,7 @@ export default function OrdersPage() {
             ))}
             {!orders.length && (
               <tr>
-                <td colSpan={7} className="muted">Chưa có đơn hàng.</td>
+                <td colSpan={8} className="muted">Chưa có đơn hàng.</td>
               </tr>
             )}
           </tbody>
